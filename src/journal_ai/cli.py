@@ -9,6 +9,7 @@ from journal_ai.journal_reader import (
     read_markdown_file,
 )
 from journal_ai.ollama_client import OllamaClient, OllamaError
+from journal_ai.output_writer import OutputWriteError, save_analysis
 from journal_ai.prompts import (
     SYSTEM_PROMPT,
     build_entry_analysis_prompt,
@@ -65,6 +66,12 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Ollama server URL. Default: {DEFAULT_OLLAMA_URL}",
     )
 
+    analyze_parser.add_argument(
+        "--save",
+        action="store_true",
+        help="Save the analysis under generated/analyses.",
+    )
+
     return parser
 
 
@@ -93,6 +100,7 @@ def analyze_document(
     relative_file: Path,
     model: str,
     ollama_url: str,
+    save: bool = False,
 ) -> int:
     resolved_journal_path = journal_path.expanduser().resolve()
     selected_path = resolved_journal_path / relative_file
@@ -123,6 +131,16 @@ def analyze_document(
             f"{response.response_tokens or 0} output tokens"
         )
 
+    if save:
+        output_path = save_analysis(
+            journal_path=resolved_journal_path,
+            source_relative_path=document.relative_path,
+            model=response.model,
+            analysis_text=response.text,
+        )
+        print()
+        print(f"Saved analysis to: {output_path}")
+
     return 0
 
 
@@ -140,8 +158,9 @@ def main() -> int:
                 relative_file=args.file,
                 model=args.model,
                 ollama_url=args.ollama_url,
+                save=args.save,
             )
-    except (JournalError, OllamaError) as exc:
+    except (JournalError, OllamaError, OutputWriteError) as exc:
         print(f"Error: {exc}")
         return 1
 

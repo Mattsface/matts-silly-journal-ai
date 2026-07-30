@@ -5,6 +5,8 @@ from pathlib import Path
 
 from journal_ai.models import JournalDocument
 
+EXCLUDED_TOP_LEVEL_DIRS = frozenset({"generated", ".journal-ai"})
+
 
 class JournalError(Exception):
     """Base exception for journal access problems."""
@@ -21,6 +23,22 @@ class JournalReadError(JournalError):
 def is_mountpoint(path: Path) -> bool:
     """Return True when path is an active filesystem mount point."""
     return path.is_mount()
+
+
+def _is_excluded_source_path(
+    file_path: Path,
+    journal_path: Path,
+) -> bool:
+    """Return True when a Markdown path must not be treated as source."""
+    try:
+        relative_path = file_path.relative_to(journal_path)
+    except ValueError:
+        return True
+
+    return bool(
+        relative_path.parts
+        and relative_path.parts[0] in EXCLUDED_TOP_LEVEL_DIRS
+    )
 
 
 def find_markdown_files(journal_path: Path) -> list[Path]:
@@ -44,6 +62,7 @@ def find_markdown_files(journal_path: Path) -> list[Path]:
         path
         for path in journal_path.rglob("*.md")
         if path.is_file()
+        and not _is_excluded_source_path(path, journal_path)
     )
 
 
