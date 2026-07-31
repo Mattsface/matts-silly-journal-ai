@@ -1,8 +1,19 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
+from journal_ai.config import (
+    DEFAULT_CONFIG_LOCATION,
+    DEFAULT_JOURNAL_LOCATION,
+    AppConfig,
+    ConfigError,
+    OllamaConfig,
+    apply_overrides,
+    load_config,
+)
 from journal_ai.journal_reader import (
     JournalError,
     load_journal_documents,
@@ -15,10 +26,6 @@ from journal_ai.prompts import (
     build_entry_analysis_prompt,
 )
 
-DEFAULT_JOURNAL_PATH = Path.home() / "journal"
-DEFAULT_MODEL = "qwen3.5:4b"
-DEFAULT_OLLAMA_URL = "http://localhost:11434"
-
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -26,12 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Local tools for an encrypted Markdown journal.",
     )
 
-    parser.add_argument(
-        "--journal-path",
-        type=Path,
-        default=DEFAULT_JOURNAL_PATH,
-        help=f"Mounted journal directory. Default: {DEFAULT_JOURNAL_PATH}",
-    )
+    _add_settings_arguments(parser, suppress_defaults=False)
 
     subparsers = parser.add_subparsers(
         dest="command",
@@ -54,17 +56,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path relative to the mounted journal directory.",
     )
 
-    analyze_parser.add_argument(
-        "--model",
-        default=DEFAULT_MODEL,
-        help=f"Ollama model to use. Default: {DEFAULT_MODEL}",
-    )
-
-    analyze_parser.add_argument(
-        "--ollama-url",
-        default=DEFAULT_OLLAMA_URL,
-        help=f"Ollama server URL. Default: {DEFAULT_OLLAMA_URL}",
-    )
+    # The same settings are accepted before or after the subcommand.
+    # Suppressed defaults keep unused options from clearing values that
+    # were already supplied to the top-level parser.
+    _add_settings_arguments(analyze_parser, suppress_defaults=True)
 
     analyze_parser.add_argument(
         "--save",
@@ -73,6 +68,96 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     return parser
+
+
+def _add_settings_arguments(
+    parser: argparse.ArgumentParser,
+    *,
+    suppress_defaults: bool,
+) -> None:
+    """Add the options that override configuration-file values."""
+    default: Any = argparse.SUPPRESS if suppress_defaults else None
+    defaults = OllamaConfig()
+
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=default,
+        help=(
+            "Configuration file to read. "
+            f"Default: {DEFAULT_CONFIG_LOCATION}"
+        ),
+    )
+
+    parser.add_argument(
+        "--journal-path",
+        type=Path,
+        default=default,
+        help=f"Mounted journal directory. Default: {DEFAULT_JOURNAL_LOCATION}",
+    )
+
+    parser.add_argument(
+        "--model",
+        default=default,
+        help=f"Ollama model to use. Default: {defaults.model}",
+    )
+
+    parser.add_argument(
+        "--ollama-url",
+        default=default,
+        help=f"Ollama server URL. Default: {defaults.url}",
+    )
+
+    parser.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=default,
+        help=(
+            "Ollama request timeout in seconds. "
+            f"Default: {defaults.timeout_seconds}"
+        ),
+    )
+
+    parser.add_argument(
+        "--num-predict",
+        type=int,
+        default=default,
+        help=(
+            "Maximum number of generated tokens. "
+            f"Default: {defaults.num_predict}"
+        ),
+    )
+
+    thinking = parser.add_mutually_exclusive_group()
+
+    thinking.add_argument(
+        "--think",
+        dest="think",
+        action="store_true",
+        default=default,
+        help="Ask the model to think before answering.",
+    )
+
+    thinking.add_argument(
+        "--no-think",
+        dest="think",
+        action="store_false",
+        default=default,
+        help="Disable model thinking.",
+    )
+
+
+def resolve_config(args: argparse.Namespace) -> AppConfig:
+    """Resolve settings from CLI options, the config file, and defaults."""
+    return apply_overrides(
+        load_config(args.config),
+        journal_path=args.journal_path,
+        ollama_url=args.ollama_url,
+        model=args.model,
+        timeout_seconds=args.timeout_seconds,
+        num_predict=args.num_predict,
+        think=args.think,
+    )
 
 
 def list_documents(journal_path: Path) -> int:
@@ -96,13 +181,11 @@ def list_documents(journal_path: Path) -> int:
 
 def analyze_document(
     *,
-    journal_path: Path,
+    config: AppConfig,
     relative_file: Path,
-    model: str,
-    ollama_url: str,
     save: bool = False,
 ) -> int:
-    resolved_journal_path = journal_path.expanduser().resolve()
+    resolved_journal_path = config.journal_path.expanduser().resolve()
     selected_path = resolved_journal_path / relative_file
 
     document = read_markdown_file(
@@ -110,12 +193,17 @@ def analyze_document(
         resolved_journal_path,
     )
 
-    client = OllamaClient(base_url=ollama_url)
+    client = OllamaClient(
+        base_url=config.ollama.url,
+        timeout_seconds=config.ollama.timeout_seconds,
+    )
 
     response = client.generate(
-        model=model,
+        model=config.ollama.model,
         system=SYSTEM_PROMPT,
         prompt=build_entry_analysis_prompt(document),
+        num_predict=config.ollama.num_predict,
+        think=config.ollama.think,
     )
 
     print(f"Source: {document.relative_path}")
@@ -144,23 +232,28 @@ def analyze_document(
     return 0
 
 
-def main() -> int:
-    args = build_parser().parse_args()
+def main(argv: Sequence[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
     command = args.command or "list"
 
     try:
+        config = resolve_config(args)
+
         if command == "list":
-            return list_documents(args.journal_path)
+            return list_documents(config.journal_path)
 
         if command == "analyze":
             return analyze_document(
-                journal_path=args.journal_path,
+                config=config,
                 relative_file=args.file,
-                model=args.model,
-                ollama_url=args.ollama_url,
                 save=args.save,
             )
-    except (JournalError, OllamaError, OutputWriteError) as exc:
+    except (
+        ConfigError,
+        JournalError,
+        OllamaError,
+        OutputWriteError,
+    ) as exc:
         print(f"Error: {exc}")
         return 1
 
