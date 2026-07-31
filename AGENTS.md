@@ -40,6 +40,7 @@ Current Components
 The project currently includes:
 
 * CLI argument parsing and commands
+* Centralized TOML configuration
 * Mounted-journal validation
 * Markdown source discovery
 * Immutable JournalDocument models
@@ -59,6 +60,7 @@ journal-ai/
 │   └── journal_ai/
 │       ├── __init__.py
 │       ├── cli.py
+│       ├── config.py
 │       ├── journal_reader.py
 │       ├── models.py
 │       ├── ollama_client.py
@@ -122,7 +124,7 @@ The server may be:
 
 Do not assume a public or authenticated endpoint.
 
-Current performance-oriented settings include:
+Current performance-oriented defaults include:
 
 "think": False
 
@@ -132,7 +134,26 @@ and:
     "num_predict": 300,
 }
 
-These settings may later become configurable. Preserve current behavior unless the requested work changes it intentionally.
+These values now live in src/journal_ai/config.py. OllamaClient receives its timeout when constructed and receives num_predict and think per request. Preserve the current defaults and the non-streaming request shape unless the requested work changes them intentionally.
+
+Configuration
+
+Settings are resolved in src/journal_ai/config.py.
+
+The optional user configuration file is:
+
+~/.config/journal-ai/config.toml
+
+Rules for future work:
+
+1. Keep every built-in default in config.py. Do not reintroduce hardcoded settings in the CLI, the Ollama client, or other modules.
+2. Resolve settings in this order: explicit command-line option, configuration file value, built-in default.
+3. Parse TOML with the standard-library tomllib. Do not add an external TOML dependency.
+4. A missing configuration file is not an error. Use the defaults.
+5. Reject unknown configuration keys, wrong types, empty strings, and non-positive numbers with ConfigError. Configuration mistakes must not fail silently.
+6. Pass configuration explicitly. Do not add global mutable configuration, singletons, or configuration reads at module import time.
+7. The configuration file is plain text outside the encrypted volume. It must never hold passwords, encryption keys, tokens, or journal content, and code must not write journal content into it.
+8. Tests must never read the real ~/.config/journal-ai/config.toml. The autouse fixture in tests/conftest.py redirects the home directory to a temporary path; keep it working.
 
 Coding Guidelines
 
@@ -175,6 +196,8 @@ Important cases include:
 * Invalid Ollama response
 * Generated analysis saved separately
 * Original source content remaining unchanged
+* Missing, empty, partial, and invalid configuration files
+* Command-line options overriding configuration values
 
 Required Checks
 
