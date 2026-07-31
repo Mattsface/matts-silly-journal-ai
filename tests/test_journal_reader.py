@@ -1,4 +1,5 @@
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -54,3 +55,32 @@ def test_file_outside_journal_is_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(JournalReadError, match="outside"):
         read_markdown_file(outside_file, journal_path)
+
+
+@patch("journal_ai.journal_reader.is_mountpoint", return_value=True)
+def test_generated_analyses_are_excluded_from_discovery(
+    _mock_is_mountpoint: object,
+    tmp_path: Path,
+) -> None:
+    journal_path = tmp_path / "journal"
+    journals_dir = journal_path / "journals"
+    generated_dir = journal_path / "generated" / "analyses"
+    app_state_dir = journal_path / ".journal-ai"
+    journals_dir.mkdir(parents=True)
+    generated_dir.mkdir(parents=True)
+    app_state_dir.mkdir(parents=True)
+
+    source_path = journals_dir / "entry.md"
+    source_path.write_text("Source entry.", encoding="utf-8")
+    (generated_dir / "analysis.md").write_text(
+        "# Journal analysis\n\nBody\n",
+        encoding="utf-8",
+    )
+    (app_state_dir / "notes.md").write_text(
+        "App state notes.",
+        encoding="utf-8",
+    )
+
+    discovered = find_markdown_files(journal_path)
+
+    assert discovered == [source_path.resolve()]

@@ -52,9 +52,10 @@ class OllamaClient:
             "model": model,
             "prompt": prompt,
             "stream": False,
+            "think": False,
             "options": {
                 "num_predict": 300,
-                }
+            },
         }
 
         if system is not None:
@@ -111,11 +112,17 @@ class OllamaClient:
                 "Ollama response did not contain generated text"
             )
 
+        stripped_text = text.strip()
+        if not stripped_text:
+            raise OllamaResponseError(
+                "Ollama returned an empty or whitespace-only response"
+            )
+
         if not isinstance(returned_model, str):
             returned_model = model
 
         return OllamaResponse(
-            text=text.strip(),
+            text=stripped_text,
             model=returned_model,
             prompt_tokens=self._optional_int(
                 parsed.get("prompt_eval_count")

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock, patch
 from urllib.error import URLError
+from urllib.request import Request
 
 import pytest
 
@@ -19,6 +20,36 @@ def make_mock_response(data: dict[str, object]) -> MagicMock:
     response.__enter__.return_value = response
     response.__exit__.return_value = False
     return response
+
+
+def request_payload(mock_urlopen: MagicMock) -> dict[str, object]:
+    request = mock_urlopen.call_args.args[0]
+    assert isinstance(request, Request)
+    assert request.data is not None
+    parsed = json.loads(request.data.decode("utf-8"))
+    assert isinstance(parsed, dict)
+    return parsed
+
+
+@patch("journal_ai.ollama_client.urlopen")
+def test_generate_payload_disables_thinking(
+    mock_urlopen: MagicMock,
+) -> None:
+    mock_urlopen.return_value = make_mock_response(
+        {
+            "model": "test-model",
+            "response": "A useful response.",
+        }
+    )
+
+    client = OllamaClient()
+    client.generate(model="test-model", prompt="Analyze this.")
+
+    payload = request_payload(mock_urlopen)
+
+    assert payload["stream"] is False
+    assert payload["think"] is False
+    assert payload["options"] == {"num_predict": 300}
 
 
 @patch("journal_ai.ollama_client.urlopen")
@@ -75,6 +106,52 @@ def test_missing_response_text_is_rejected(
     with pytest.raises(
         OllamaResponseError,
         match="generated text",
+    ):
+        client.generate(
+            model="test-model",
+            prompt="Analyze this.",
+        )
+
+
+@patch("journal_ai.ollama_client.urlopen")
+def test_empty_response_is_rejected(
+    mock_urlopen: MagicMock,
+) -> None:
+    mock_urlopen.return_value = make_mock_response(
+        {
+            "model": "test-model",
+            "response": "",
+        }
+    )
+
+    client = OllamaClient()
+
+    with pytest.raises(
+        OllamaResponseError,
+        match="empty or whitespace-only",
+    ):
+        client.generate(
+            model="test-model",
+            prompt="Analyze this.",
+        )
+
+
+@patch("journal_ai.ollama_client.urlopen")
+def test_whitespace_only_response_is_rejected(
+    mock_urlopen: MagicMock,
+) -> None:
+    mock_urlopen.return_value = make_mock_response(
+        {
+            "model": "test-model",
+            "response": "   \n\t  ",
+        }
+    )
+
+    client = OllamaClient()
+
+    with pytest.raises(
+        OllamaResponseError,
+        match="empty or whitespace-only",
     ):
         client.generate(
             model="test-model",
