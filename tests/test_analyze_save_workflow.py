@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from journal_ai.cli import analyze_document
+from journal_ai.config import AppConfig, OllamaConfig
 from journal_ai.journal_reader import find_markdown_files
 
 
@@ -42,11 +43,14 @@ def test_analyze_save_writes_visible_content_without_changing_source(
         }
     )
 
-    exit_code = analyze_document(
+    config = AppConfig(
         journal_path=journal_path,
+        ollama=OllamaConfig(model="test-model"),
+    )
+
+    exit_code = analyze_document(
+        config=config,
         relative_file=source_relative,
-        model="test-model",
-        ollama_url="http://localhost:11434",
         save=True,
     )
 

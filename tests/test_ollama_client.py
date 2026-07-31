@@ -14,6 +14,13 @@ from journal_ai.ollama_client import (
 )
 
 
+def make_client() -> OllamaClient:
+    return OllamaClient(
+        base_url="http://localhost:11434",
+        timeout_seconds=900.0,
+    )
+
+
 def make_mock_response(data: dict[str, object]) -> MagicMock:
     response = MagicMock()
     response.read.return_value = json.dumps(data).encode("utf-8")
@@ -32,7 +39,7 @@ def request_payload(mock_urlopen: MagicMock) -> dict[str, object]:
 
 
 @patch("journal_ai.ollama_client.urlopen")
-def test_generate_payload_disables_thinking(
+def test_generate_payload_uses_supplied_settings(
     mock_urlopen: MagicMock,
 ) -> None:
     mock_urlopen.return_value = make_mock_response(
@@ -42,12 +49,42 @@ def test_generate_payload_disables_thinking(
         }
     )
 
-    client = OllamaClient()
-    client.generate(model="test-model", prompt="Analyze this.")
+    client = make_client()
+    client.generate(
+        model="test-model",
+        prompt="Analyze this.",
+        num_predict=42,
+        think=True,
+    )
 
     payload = request_payload(mock_urlopen)
 
     assert payload["stream"] is False
+    assert payload["think"] is True
+    assert payload["options"] == {"num_predict": 42}
+
+
+@patch("journal_ai.ollama_client.urlopen")
+def test_generate_payload_can_disable_thinking(
+    mock_urlopen: MagicMock,
+) -> None:
+    mock_urlopen.return_value = make_mock_response(
+        {
+            "model": "test-model",
+            "response": "A useful response.",
+        }
+    )
+
+    client = make_client()
+    client.generate(
+        model="test-model",
+        prompt="Analyze this.",
+        num_predict=300,
+        think=False,
+    )
+
+    payload = request_payload(mock_urlopen)
+
     assert payload["think"] is False
     assert payload["options"] == {"num_predict": 300}
 
@@ -63,10 +100,12 @@ def test_generate_returns_response(mock_urlopen: MagicMock) -> None:
         }
     )
 
-    client = OllamaClient()
+    client = make_client()
     response = client.generate(
         model="test-model",
         prompt="Analyze this.",
+        num_predict=300,
+        think=False,
     )
 
     assert response.text == "A useful response."
@@ -81,7 +120,7 @@ def test_connection_error_is_wrapped(
 ) -> None:
     mock_urlopen.side_effect = URLError("Connection refused")
 
-    client = OllamaClient()
+    client = make_client()
 
     with pytest.raises(
         OllamaConnectionError,
@@ -90,6 +129,8 @@ def test_connection_error_is_wrapped(
         client.generate(
             model="test-model",
             prompt="Analyze this.",
+            num_predict=300,
+            think=False,
         )
 
 
@@ -101,7 +142,7 @@ def test_missing_response_text_is_rejected(
         {"model": "test-model"}
     )
 
-    client = OllamaClient()
+    client = make_client()
 
     with pytest.raises(
         OllamaResponseError,
@@ -110,6 +151,8 @@ def test_missing_response_text_is_rejected(
         client.generate(
             model="test-model",
             prompt="Analyze this.",
+            num_predict=300,
+            think=False,
         )
 
 
@@ -124,7 +167,7 @@ def test_empty_response_is_rejected(
         }
     )
 
-    client = OllamaClient()
+    client = make_client()
 
     with pytest.raises(
         OllamaResponseError,
@@ -133,6 +176,8 @@ def test_empty_response_is_rejected(
         client.generate(
             model="test-model",
             prompt="Analyze this.",
+            num_predict=300,
+            think=False,
         )
 
 
@@ -147,7 +192,7 @@ def test_whitespace_only_response_is_rejected(
         }
     )
 
-    client = OllamaClient()
+    client = make_client()
 
     with pytest.raises(
         OllamaResponseError,
@@ -156,4 +201,6 @@ def test_whitespace_only_response_is_rejected(
         client.generate(
             model="test-model",
             prompt="Analyze this.",
+            num_predict=300,
+            think=False,
         )

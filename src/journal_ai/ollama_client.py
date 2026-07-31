@@ -34,8 +34,8 @@ class OllamaClient:
 
     def __init__(
         self,
-        base_url: str = "http://localhost:11434",
-        timeout_seconds: float = 900.0,
+        base_url: str,
+        timeout_seconds: float,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
@@ -45,6 +45,8 @@ class OllamaClient:
         *,
         model: str,
         prompt: str,
+        num_predict: int,
+        think: bool,
         system: str | None = None,
     ) -> OllamaResponse:
         """Generate one non-streaming response from Ollama."""
@@ -52,9 +54,9 @@ class OllamaClient:
             "model": model,
             "prompt": prompt,
             "stream": False,
-            "think": False,
+            "think": think,
             "options": {
-                "num_predict": 300,
+                "num_predict": num_predict,
             },
         }
 

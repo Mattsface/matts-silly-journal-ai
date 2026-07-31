@@ -1,0 +1,14 @@
+.venv/
+.env
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Local journal data must never be committed.
+journal/
+journal-encrypted/
+generated/
+.journal-ai/
+config.toml

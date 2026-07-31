@@ -62,6 +62,8 @@ The current implementation supports:
 * Connecting to a local or remote Ollama server
 * Saving generated analyses under `generated/analyses`
 * Preserving original journal files unchanged
+* Reading optional settings from `~/.config/journal-ai/config.toml`
+* Overriding any configured setting from the command line
 * Automated tests, linting, and type checking
 
 Planned features are documented later in this README.
@@ -74,12 +76,17 @@ journal-ai/
 │   └── journal_ai/
 │       ├── __init__.py
 │       ├── cli.py
+│       ├── config.py
 │       ├── journal_reader.py
 │       ├── models.py
 │       ├── ollama_client.py
 │       ├── output_writer.py
 │       └── prompts.py
 ├── tests/
+│   ├── conftest.py
+│   ├── test_analyze_save_workflow.py
+│   ├── test_cli_config.py
+│   ├── test_config.py
 │   ├── test_journal_reader.py
 │   ├── test_ollama_client.py
 │   └── test_output_writer.py
@@ -303,31 +310,107 @@ This allows Ollama to run on another computer, such as a MacBook M1 Pro acting a
 
 Do not expose an unauthenticated Ollama server directly to the public internet.
 
-## Ollama Configuration
+To avoid repeating these options, put them in the configuration file described below.
 
-The current default model is:
+## Configuration
+
+Settings come from an optional TOML file. The default location is:
 
 ```text
-qwen3.5:4b
+~/.config/journal-ai/config.toml
 ```
 
-Generation is intentionally limited:
+The file is optional. When it does not exist, the built-in defaults are used and no error is reported.
 
-```python
-"options": {
-    "num_predict": 300,
-}
+### Precedence
+
+```text
+Explicit command-line option
+        ↓
+Configuration file value
+        ↓
+Built-in default
 ```
 
-Limiting output tokens reduces response time on slower hardware and keeps single-entry analyses concise.
+### Example config.toml
 
-Thinking is disabled when supported:
+```toml
+journal_path = "/home/example-user/journal"
 
-```python
-"think": False
+[ollama]
+url = "http://localhost:11434"
+model = "qwen3.5:4b"
+timeout_seconds = 900
+num_predict = 300
+think = false
 ```
 
-This prevents the model from spending the output-token allowance on hidden reasoning without producing a visible answer.
+Replace `/home/example-user/journal` with your own mount point. A leading `~` is expanded, so `journal_path = "~/journal"` also works.
+
+### Supported settings
+
+| Setting | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `journal_path` | string | `~/journal` | Mounted journal directory |
+| `ollama.url` | string | `http://localhost:11434` | Ollama server URL |
+| `ollama.model` | string | `qwen3.5:4b` | Model used for analysis |
+| `ollama.timeout_seconds` | number > 0 | `900` | HTTP request timeout |
+| `ollama.num_predict` | integer > 0 | `300` | Maximum generated tokens |
+| `ollama.think` | boolean | `false` | Whether the model may think before answering |
+
+Limiting output tokens reduces response time on slower hardware and keeps single-entry analyses concise. Thinking is disabled by default so the model does not spend the output-token allowance on hidden reasoning without producing a visible answer.
+
+### Validation
+
+Configuration mistakes fail loudly rather than silently:
+
+* Invalid TOML is rejected.
+* Wrong value types are rejected.
+* Zero or negative `timeout_seconds` and `num_predict` values are rejected.
+* Empty strings are rejected.
+* **Unknown keys are rejected**, so a typo such as `jurnal_path` reports an error instead of being ignored.
+
+### Use a different configuration file
+
+```bash
+uv run journal-ai --config /tmp/config.toml list
+uv run journal-ai --config /tmp/config.toml analyze journals/2026_07_28.md
+```
+
+A missing file at an explicitly supplied `--config` path is also treated as "use the defaults".
+
+### Command-line overrides
+
+Every setting has a command-line override. None of them are required.
+
+```bash
+uv run journal-ai --journal-path /mnt/journal list
+
+uv run journal-ai analyze journals/2026_07_28.md \
+  --model qwen3.5:4b \
+  --ollama-url http://192.168.1.42:11434 \
+  --timeout-seconds 120 \
+  --num-predict 500 \
+  --no-think
+```
+
+`--think` and `--no-think` are mutually exclusive. These options may be given before or after the subcommand:
+
+```bash
+uv run journal-ai --model qwen3.5:4b analyze journals/2026_07_28.md
+```
+
+### Do not store secrets in this file
+
+The configuration file is plain text outside the encrypted volume.
+
+Never put the following in `config.toml`:
+
+* Passwords
+* gocryptfs encryption keys or passphrases
+* API tokens
+* Journal content or quotations from entries
+* Anything else that must stay encrypted
 
 ## Security Model
 
