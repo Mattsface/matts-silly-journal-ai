@@ -222,10 +222,16 @@ def list_documents(journal_path: Path) -> int:
 def index_journal(*, config: AppConfig, rebuild: bool = False) -> int:
     """Update or rebuild the local index and print a summary of the changes."""
     if rebuild:
-        result = rebuild_index(journal_path=config.journal_path)
+        result = rebuild_index(
+            journal_path=config.journal_path,
+            chunking=config.chunking,
+        )
         summary = "Index rebuilt."
     else:
-        result = update_index(journal_path=config.journal_path)
+        result = update_index(
+            journal_path=config.journal_path,
+            chunking=config.chunking,
+        )
         summary = (
             "Index updated."
             if result.has_changes
@@ -233,10 +239,15 @@ def index_journal(*, config: AppConfig, rebuild: bool = False) -> int:
         )
 
     print(summary)
+    print("Documents")
     print(f"{'New:':<11}{result.new}")
     print(f"{'Changed:':<11}{result.changed}")
     print(f"{'Unchanged:':<11}{result.unchanged}")
     print(f"{'Deleted:':<11}{result.deleted}")
+    print("Chunks")
+    print(f"{'Created:':<11}{result.chunks_created}")
+    print(f"{'Removed:':<11}{result.chunks_removed}")
+    print(f"{'Total:':<11}{result.chunks_total}")
 
     return 0
 
@@ -251,6 +262,7 @@ def show_index_status(*, config: AppConfig) -> int:
 
     print(f"Database: {status.database_path}")
     print(f"Documents: {status.document_count}")
+    print(f"Chunks: {status.chunk_count}")
     print(f"Last updated: {last_indexed_at}")
 
     if not status.database_exists:

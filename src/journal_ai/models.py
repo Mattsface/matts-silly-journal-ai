@@ -46,6 +46,25 @@ class IndexedDocument:
 
 
 @dataclass(frozen=True, slots=True)
+class TextChunk:
+    """One deterministic chunk of source text before it is stored in SQLite."""
+
+    chunk_index: int
+    content: str
+    content_hash: str
+    start_line: int
+    end_line: int
+    character_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentChunk(TextChunk):
+    """One chunk row linked to an indexed source document."""
+
+    document_id: int
+
+
+@dataclass(frozen=True, slots=True)
 class IndexResult:
     """How one index run classified the discovered Markdown files.
 
@@ -57,6 +76,9 @@ class IndexResult:
     changed_paths: tuple[Path, ...] = ()
     unchanged_paths: tuple[Path, ...] = ()
     deleted_paths: tuple[Path, ...] = ()
+    chunks_created: int = 0
+    chunks_removed: int = 0
+    chunks_total: int = 0
 
     @property
     def new(self) -> int:
@@ -86,4 +108,5 @@ class IndexStatus:
     database_path: Path
     database_exists: bool
     document_count: int
+    chunk_count: int
     last_indexed_at: datetime | None

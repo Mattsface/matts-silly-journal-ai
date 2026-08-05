@@ -57,7 +57,7 @@ def test_schema_is_created_automatically(tmp_path: Path) -> None:
         assert database.read_last_indexed_at() is None
 
     assert database_path.is_file()
-    assert {"documents", "index_metadata"} <= table_names(database_path)
+    assert {"documents", "index_metadata", "chunks"} <= table_names(database_path)
 
 
 def test_schema_version_is_recorded(tmp_path: Path) -> None:

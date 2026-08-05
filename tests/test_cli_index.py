@@ -36,6 +36,8 @@ def test_index_command_reports_new_files(
     assert "Changed:   0" in captured
     assert "Unchanged: 0" in captured
     assert "Deleted:   0" in captured
+    assert "Chunks" in captured
+    assert "Total:" in captured
 
 
 def test_second_index_run_reports_no_changes(
@@ -56,6 +58,8 @@ def test_second_index_run_reports_no_changes(
     assert "Changed:   0" in captured
     assert "Unchanged: 2" in captured
     assert "Deleted:   0" in captured
+    assert "Chunks" in captured
+    assert "Total:" in captured
 
 
 def test_index_command_never_prints_journal_content(
@@ -89,8 +93,9 @@ def test_index_status_reports_metadata(
     lines = capsys.readouterr().out.splitlines()
     assert lines[0] == f"Database: {index_database_path(mounted_journal)}"
     assert lines[1] == "Documents: 1"
-    assert lines[2].startswith("Last updated: 20")
-    assert lines[2].endswith("+00:00")
+    assert lines[2] == "Chunks: 1"
+    assert lines[3].startswith("Last updated: 20")
+    assert lines[3].endswith("+00:00")
 
 
 def test_index_status_without_a_database_creates_nothing(
