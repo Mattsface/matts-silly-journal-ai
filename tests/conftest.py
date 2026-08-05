@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -20,3 +22,16 @@ def isolated_home(
     monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     return home
+
+
+@pytest.fixture
+def mounted_journal(tmp_path: Path) -> Iterator[Path]:
+    """Provide a temporary journal directory that looks like a live mount.
+
+    Mount detection is mocked so tests never need the real encrypted volume.
+    """
+    journal_path = tmp_path / "journal"
+    (journal_path / "journals").mkdir(parents=True)
+
+    with patch("journal_ai.journal_reader.is_mountpoint", return_value=True):
+        yield journal_path

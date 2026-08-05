@@ -41,8 +41,8 @@ def _is_excluded_source_path(
     )
 
 
-def find_markdown_files(journal_path: Path) -> list[Path]:
-    """Return all Markdown files inside the mounted journal."""
+def ensure_journal_mounted(journal_path: Path) -> Path:
+    """Return the resolved journal path, rejecting locked or missing mounts."""
     journal_path = journal_path.expanduser().resolve()
 
     if not journal_path.exists():
@@ -57,6 +57,13 @@ def find_markdown_files(journal_path: Path) -> list[Path]:
             "Unlock it with:\n"
             f"  gocryptfs ~/journal-encrypted {journal_path}"
         )
+
+    return journal_path
+
+
+def find_markdown_files(journal_path: Path) -> list[Path]:
+    """Return all Markdown files inside the mounted journal."""
+    journal_path = ensure_journal_mounted(journal_path)
 
     return sorted(
         path

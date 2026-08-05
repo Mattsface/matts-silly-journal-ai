@@ -58,6 +58,8 @@ The current implementation supports:
 * Loading journal entries into immutable Python objects
 * Rejecting files outside the journal directory
 * Listing journal entries with word and character counts
+* Tracking journal files in a local SQLite index
+* Detecting which entries are new, changed, unchanged, or deleted
 * Analyzing one explicitly selected journal entry
 * Connecting to a local or remote Ollama server
 * Saving generated analyses under `generated/analyses`
@@ -77,6 +79,9 @@ journal-ai/
 │       ├── __init__.py
 │       ├── cli.py
 │       ├── config.py
+│       ├── hashing.py
+│       ├── index_database.py
+│       ├── index_service.py
 │       ├── journal_reader.py
 │       ├── models.py
 │       ├── ollama_client.py
@@ -86,7 +91,11 @@ journal-ai/
 │   ├── conftest.py
 │   ├── test_analyze_save_workflow.py
 │   ├── test_cli_config.py
+│   ├── test_cli_index.py
 │   ├── test_config.py
+│   ├── test_hashing.py
+│   ├── test_index_database.py
+│   ├── test_index_service.py
 │   ├── test_journal_reader.py
 │   ├── test_ollama_client.py
 │   └── test_output_writer.py
@@ -312,6 +321,142 @@ Do not expose an unauthenticated Ollama server directly to the public internet.
 
 To avoid repeating these options, put them in the configuration file described below.
 
+## Journal Index
+
+### What the index is
+
+The index is a small local SQLite inventory of the Markdown files in the mounted journal. It records one row per source file and answers four questions:
+
+* Which files are new?
+* Which files changed?
+* Which files are unchanged?
+* Which previously indexed files were deleted?
+
+It also records when the last successful index run finished.
+
+### Why it exists
+
+Later features such as embeddings, semantic search, and weekly reviews should not reprocess the whole journal every time. The index gives them a cheap, reliable way to work on only the entries that actually changed.
+
+The index is **not** the journal. The Markdown files remain the source of truth.
+
+### Database location
+
+The database path is derived from the configured journal path:
+
+```text
+<journal_path>/.journal-ai/index.sqlite
+```
+
+With the default journal path this is:
+
+```text
+~/journal/.journal-ai/index.sqlite
+```
+
+Keeping it there means the index lives inside the encrypted volume, next to the journal it describes, and is unlocked and locked together with it. The `.journal-ai` directory is excluded from source discovery, so the application never indexes or analyzes its own state.
+
+There is deliberately no configuration setting for this path. An index describes exactly one journal, so it is derived from `journal_path` instead of being configured separately.
+
+### Data stored
+
+For each Markdown file the index stores:
+
+| Column | Meaning |
+| --- | --- |
+| `relative_path` | Path relative to the mounted journal directory |
+| `content_hash` | SHA-256 hex digest of the file's bytes |
+| `file_size` | Size in bytes |
+| `modified_at` | Filesystem modification time, UTC |
+| `first_indexed_at` | When the file first entered the index, UTC |
+| `last_indexed_at` | When the stored record was last written, UTC |
+
+A second table, `index_metadata`, holds only the schema version and the time of the last successful index run.
+
+**Journal content is not stored.** This first version of the index keeps file metadata and hashes only. No entry text, no excerpts, and no embeddings.
+
+**No Ollama calls occur.** Indexing is pure filesystem and SQLite work. It makes no network requests of any kind.
+
+### Update the index
+
+```bash
+uv run journal-ai index
+```
+
+Example output:
+
+```text
+Index updated.
+New:       2
+Changed:   1
+Unchanged: 14
+Deleted:   0
+```
+
+Running it again without changing any entries reports:
+
+```text
+Index already current.
+New:       0
+Changed:   0
+Unchanged: 17
+Deleted:   0
+```
+
+### Show index status
+
+```bash
+uv run journal-ai index --status
+```
+
+Example output:
+
+```text
+Database: /home/example/journal/.journal-ai/index.sqlite
+Documents: 17
+Last updated: 2026-07-31T13:24:18+00:00
+```
+
+Status reads the database only. It does not scan the journal, and it does not create the database.
+
+### Rebuild the index
+
+```bash
+uv run journal-ai index --rebuild
+```
+
+This deletes the database file and rebuilds it from the current source files, so every discovered entry is reported as new. Use it after upgrading the schema or if the database is ever damaged.
+
+Only the index database and its SQLite sidecar files are deleted. Journal entries are never touched.
+
+### The index is rebuildable
+
+The database is disposable application state. Deleting it loses nothing that matters:
+
+```bash
+rm ~/journal/.journal-ai/index.sqlite
+uv run journal-ai index
+```
+
+Because the index can always be rebuilt from the Markdown files, it does not need to be backed up separately, and a damaged database is never a data loss event.
+
+### How change detection works
+
+Each indexed run compares the files it discovers with the records already stored:
+
+| Situation | Classification |
+| --- | --- |
+| No database record | new |
+| Record exists, content hash differs | changed |
+| Record exists, content hash matches | unchanged |
+| Record exists, file no longer on disk | deleted |
+
+The content hash is authoritative. File size and modification time are stored as metadata and are refreshed when they drift, but they never decide that content changed. Touching a file, or restoring it from a backup, therefore leaves it classified as unchanged and does not mark it for reprocessing.
+
+All inserts, updates, and deletions for one run are applied inside a single SQLite transaction. If any statement fails, the whole run is rolled back and the index is left exactly as it was.
+
+The index command fails with a clear error when the journal is locked or not mounted.
+
 ## Configuration
 
 Settings come from an optional TOML file. The default location is:
@@ -426,6 +571,8 @@ The project currently follows these rules:
 8. Cloud backups must contain only encrypted journal data.
 9. The decrypted mount must never be synchronized to cloud storage.
 10. Ollama should run locally or on a trusted private network.
+11. The index stores file metadata and hashes, never journal content.
+12. The index database stays inside the encrypted mount under `.journal-ai`.
 
 The directory intended for encrypted cloud backup is:
 
@@ -532,6 +679,7 @@ Journal entries may contain highly sensitive information.
 Do not:
 
 * Commit journal files to Git
+* Commit the index database
 * Upload the decrypted journal directory
 * Expose Ollama directly to the public internet
 * Send entries to an untrusted remote model server

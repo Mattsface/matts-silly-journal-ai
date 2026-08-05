@@ -14,6 +14,9 @@ DEFAULT_TIMEOUT_SECONDS = 900.0
 DEFAULT_NUM_PREDICT = 300
 DEFAULT_THINK = False
 
+INDEX_STATE_DIR_NAME = ".journal-ai"
+INDEX_DATABASE_FILENAME = "index.sqlite"
+
 TOP_LEVEL_KEYS = frozenset({"journal_path", "ollama"})
 OLLAMA_KEYS = frozenset(
     {"url", "model", "timeout_seconds", "num_predict", "think"}
@@ -32,6 +35,21 @@ def default_config_path() -> Path:
 def default_journal_path() -> Path:
     """Return the default mounted journal location."""
     return Path(DEFAULT_JOURNAL_LOCATION).expanduser()
+
+
+def index_database_path(journal_path: Path) -> Path:
+    """Derive the index database location from the mounted journal path.
+
+    The index is disposable application state that describes exactly one
+    journal, so it is derived from journal_path instead of being a separate
+    configuration setting. Keeping it under INDEX_STATE_DIR_NAME also keeps
+    it inside the encrypted mount and outside source discovery.
+    """
+    return (
+        journal_path.expanduser()
+        / INDEX_STATE_DIR_NAME
+        / INDEX_DATABASE_FILENAME
+    )
 
 
 @dataclass(frozen=True, slots=True)
