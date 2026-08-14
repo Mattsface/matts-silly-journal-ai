@@ -11,7 +11,6 @@ def default_config(**overrides: int) -> ChunkingConfig:
     values = {
         "target_characters": 1000,
         "max_characters": 1600,
-        "minimum_characters": 250,
         "overlap_characters": 0,
     }
     values.update(overrides)
@@ -65,7 +64,7 @@ def test_logseq_top_level_bullet_keeps_nested_children() -> None:
         "  - I recovered faster than usual.\n"
         "- I went for a walk after work."
     )
-    config = default_config(target_characters=60, max_characters=80, minimum_characters=0)
+    config = default_config(target_characters=60, max_characters=80)
     chunks = chunk_markdown(text, config)
 
     assert len(chunks) == 2
@@ -77,7 +76,7 @@ def test_logseq_top_level_bullet_keeps_nested_children() -> None:
 
 def test_chunk_order_matches_source_order() -> None:
     text = "Alpha.\n\nBeta.\n\nGamma."
-    config = default_config(target_characters=5, max_characters=7, minimum_characters=0)
+    config = default_config(target_characters=5, max_characters=7)
     chunks = chunk_markdown(text, config)
 
     assert [chunk.content for chunk in chunks] == ["Alpha.", "Beta.", "Gamma."]
@@ -100,7 +99,7 @@ def test_chunk_hashes_are_stable() -> None:
 
 def test_line_numbers_are_one_based() -> None:
     text = "Line one.\nLine two.\n\nLine four."
-    config = default_config(target_characters=12, max_characters=20, minimum_characters=0)
+    config = default_config(target_characters=12, max_characters=20)
     chunks = chunk_markdown(text, config)
 
     assert chunks[0].start_line == 1
@@ -111,7 +110,7 @@ def test_line_numbers_are_one_based() -> None:
 
 def test_chunks_respect_configured_maximum() -> None:
     text = "word " * 500
-    config = default_config(target_characters=200, max_characters=300, minimum_characters=0)
+    config = default_config(target_characters=200, max_characters=300)
     chunks = chunk_markdown(text, config)
 
     assert chunks
@@ -120,7 +119,7 @@ def test_chunks_respect_configured_maximum() -> None:
 
 def test_small_blocks_combine_toward_target() -> None:
     text = "a" * 100 + "\n\n" + "b" * 100 + "\n\n" + "c" * 100
-    config = default_config(target_characters=250, max_characters=400, minimum_characters=0)
+    config = default_config(target_characters=250, max_characters=400)
     chunks = chunk_markdown(text, config)
 
     assert len(chunks) == 1
@@ -129,17 +128,18 @@ def test_small_blocks_combine_toward_target() -> None:
 
 def test_oversized_paragraph_splits_without_loss() -> None:
     text = "Sentence one. " * 200
-    config = default_config(target_characters=100, max_characters=120, minimum_characters=0)
+    config = default_config(target_characters=100, max_characters=120)
     chunks = chunk_markdown(text, config)
 
     assert len(chunks) > 1
     assert joined_chunks(text, config) == text
+
+
 def test_long_unbroken_string_splits_by_character() -> None:
     text = "x" * 500
     config = default_config(
         target_characters=100,
         max_characters=120,
-        minimum_characters=0,
         overlap_characters=20,
     )
     chunks = chunk_markdown(text, config)
@@ -172,7 +172,7 @@ def test_no_source_text_is_lost_for_structured_markdown() -> None:
 
 def test_source_text_is_not_reordered() -> None:
     text = "First\n\nSecond\n\nThird"
-    config = default_config(target_characters=8, max_characters=12, minimum_characters=0)
+    config = default_config(target_characters=8, max_characters=12)
     chunks = chunk_markdown(text, config)
     positions = [text.index(chunk.content) for chunk in chunks]
 
@@ -184,7 +184,6 @@ def test_character_overlap_is_deterministic() -> None:
     config = default_config(
         target_characters=80,
         max_characters=100,
-        minimum_characters=0,
         overlap_characters=25,
     )
     first = chunk_markdown(text, config)

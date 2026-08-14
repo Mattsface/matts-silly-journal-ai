@@ -375,7 +375,7 @@ For each Markdown file the index stores:
 | `first_indexed_at` | When the file first entered the index, UTC |
 | `last_indexed_at` | When the stored record was last written, UTC |
 
-A second table, `index_metadata`, holds only the schema version and the time of the last successful index run.
+A second table, `index_metadata`, holds the schema version, the time of the last successful index run, and a `chunking_signature` that records the chunking settings used to build the stored chunks.
 
 A third table, `chunks`, stores deterministic segments of each source Markdown file. Each chunk row links to a document through `document_id`, includes inclusive one-based `start_line` and `end_line` values, a SHA-256 `content_hash`, and the exact chunk text as it appears in the source file.
 
@@ -383,9 +383,13 @@ A third table, `chunks`, stores deterministic segments of each source Markdown f
 
 **No Ollama calls occur.** Indexing and chunking are pure filesystem and SQLite work. They make no network requests of any kind.
 
+**Schema upgrades are not migrated.** During this pre-release phase, an index with a different schema version is rejected. Rebuild it from Markdown with `uv run journal-ai index --rebuild`. The database is disposable; journal files are never modified.
+
 ### Chunking rules (high level)
 
-During `journal-ai index`, new and content-changed Markdown files are read once, divided into deterministic chunks, and written to SQLite. Unchanged files keep their existing chunk rows.
+During `journal-ai index`, new and content-changed Markdown files are read once, divided into deterministic chunks, and written to SQLite. Unchanged files keep their existing chunk rows unless the chunking configuration has changed.
+
+The index stores a `chunking_signature` derived from `target_characters`, `max_characters`, and `overlap_characters`. The same source content and the same chunking settings leave existing chunks untouched. Changing those settings re-chunks currently indexed source documents without classifying them as content-changed. `minimum_characters` is not a supported setting.
 
 Structural boundaries are preferred in this order:
 
@@ -402,7 +406,6 @@ Default size settings (overridable in configuration):
 | --- | --- |
 | `chunking.target_characters` | 1000 |
 | `chunking.max_characters` | 1600 |
-| `chunking.minimum_characters` | 250 |
 | `chunking.overlap_characters` | 150 |
 
 Example configuration:
@@ -411,7 +414,6 @@ Example configuration:
 [chunking]
 target_characters = 1000
 max_characters = 1600
-minimum_characters = 250
 overlap_characters = 150
 ```
 
@@ -474,7 +476,7 @@ Status reads the database only. It does not scan the journal, and it does not cr
 uv run journal-ai index --rebuild
 ```
 
-This deletes the database file and rebuilds it from the current source files, so every discovered entry is reported as new and all chunks are recreated. Use it after upgrading the schema or if the database is ever damaged.
+This deletes the database file and rebuilds it from the current source files, so every discovered entry is reported as new and all chunks and chunking metadata are recreated. Use it when the schema version does not match, after changing how the index is structured, or if the database is ever damaged.
 
 Only the index database and its SQLite sidecar files are deleted. Journal entries are never touched.
 
@@ -502,7 +504,9 @@ Each indexed run compares the files it discovers with the records already stored
 
 The content hash is authoritative. File size and modification time are stored as metadata and are refreshed when they drift, but they never decide that content changed. Touching a file, or restoring it from a backup, therefore leaves it classified as unchanged and does not mark it for reprocessing.
 
-All inserts, updates, and deletions for one run are applied inside a single SQLite transaction. If any statement fails, the whole run is rolled back and the index is left exactly as it was.
+Changing chunking configuration is tracked separately through `chunking_signature`. It can replace stored chunks without classifying the source files as content-changed.
+
+All inserts, updates, deletions, chunk replacements, and signature writes for one run are applied inside a single SQLite transaction. If any statement fails, the whole run is rolled back and the index is left exactly as it was.
 
 The index command fails with a clear error when the journal is locked or not mounted.
 
@@ -551,6 +555,9 @@ Replace `/home/example-user/journal` with your own mount point. A leading `~` is
 | `ollama.timeout_seconds` | number > 0 | `900` | HTTP request timeout |
 | `ollama.num_predict` | integer > 0 | `300` | Maximum generated tokens |
 | `ollama.think` | boolean | `false` | Whether the model may think before answering |
+| `chunking.target_characters` | integer > 0 | `1000` | Preferred chunk size while merging blocks |
+| `chunking.max_characters` | integer > 0 | `1600` | Maximum characters in a normal chunk |
+| `chunking.overlap_characters` | integer ≥ 0 | `150` | Overlap used only when oversized content is split |
 
 Limiting output tokens reduces response time on slower hardware and keeps single-entry analyses concise. Thinking is disabled by default so the model does not spend the output-token allowance on hidden reasoning without producing a visible answer.
 

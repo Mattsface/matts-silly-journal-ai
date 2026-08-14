@@ -16,7 +16,6 @@ DEFAULT_THINK = False
 
 DEFAULT_CHUNK_TARGET_CHARACTERS = 1000
 DEFAULT_CHUNK_MAX_CHARACTERS = 1600
-DEFAULT_CHUNK_MINIMUM_CHARACTERS = 250
 DEFAULT_CHUNK_OVERLAP_CHARACTERS = 150
 
 INDEX_STATE_DIR_NAME = ".journal-ai"
@@ -30,7 +29,6 @@ CHUNKING_KEYS = frozenset(
     {
         "target_characters",
         "max_characters",
-        "minimum_characters",
         "overlap_characters",
     }
 )
@@ -71,33 +69,39 @@ class ChunkingConfig:
 
     target_characters: int = DEFAULT_CHUNK_TARGET_CHARACTERS
     max_characters: int = DEFAULT_CHUNK_MAX_CHARACTERS
-    minimum_characters: int = DEFAULT_CHUNK_MINIMUM_CHARACTERS
     overlap_characters: int = DEFAULT_CHUNK_OVERLAP_CHARACTERS
 
     def __post_init__(self) -> None:
         if self.target_characters <= 0:
-            raise ConfigError("chunking.target_characters must be greater than zero")
-        if self.max_characters <= 0:
-            raise ConfigError("chunking.max_characters must be greater than zero")
-        if self.minimum_characters < 0:
             raise ConfigError(
-                "chunking.minimum_characters must be zero or greater"
+                "chunking.target_characters must be greater than zero"
+            )
+        if self.max_characters <= 0:
+            raise ConfigError(
+                "chunking.max_characters must be greater than zero"
             )
         if self.overlap_characters < 0:
-            raise ConfigError("chunking.overlap_characters must be zero or greater")
+            raise ConfigError(
+                "chunking.overlap_characters must be zero or greater"
+            )
         if self.target_characters > self.max_characters:
             raise ConfigError(
-                "chunking.target_characters must not exceed chunking.max_characters"
-            )
-        if self.minimum_characters > self.max_characters:
-            raise ConfigError(
-                "chunking.minimum_characters must not exceed chunking.max_characters"
+                "chunking.target_characters must not exceed "
+                "chunking.max_characters"
             )
         if self.overlap_characters >= self.max_characters:
             raise ConfigError(
                 "chunking.overlap_characters must be smaller than "
                 "chunking.max_characters"
             )
+
+    def signature(self) -> str:
+        """Return a stable identifier for settings that affect chunk bounds."""
+        return (
+            f"target_characters={self.target_characters};"
+            f"max_characters={self.max_characters};"
+            f"overlap_characters={self.overlap_characters}"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,15 +236,6 @@ def config_from_mapping(
             )
             if "max_characters" in chunking_data
             else chunking_defaults.max_characters
-        ),
-        minimum_characters=(
-            _as_non_negative_int(
-                chunking_data["minimum_characters"],
-                key="chunking.minimum_characters",
-                source=source,
-            )
-            if "minimum_characters" in chunking_data
-            else chunking_defaults.minimum_characters
         ),
         overlap_characters=(
             _as_non_negative_int(

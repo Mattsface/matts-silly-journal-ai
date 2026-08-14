@@ -98,7 +98,13 @@ class IndexResult:
 
     @property
     def has_changes(self) -> bool:
-        return bool(self.new_paths or self.changed_paths or self.deleted_paths)
+        return bool(
+            self.new_paths
+            or self.changed_paths
+            or self.deleted_paths
+            or self.chunks_created
+            or self.chunks_removed
+        )
 
 
 @dataclass(frozen=True, slots=True)

@@ -13,6 +13,7 @@ SCHEMA_VERSION = 2
 
 SCHEMA_VERSION_KEY = "schema_version"
 LAST_INDEXED_AT_KEY = "last_indexed_at"
+CHUNKING_SIGNATURE_KEY = "chunking_signature"
 
 # SQLite may keep a write-ahead log and a shared-memory file beside the
 # database. They must be removed together with it during a rebuild.
@@ -181,23 +182,16 @@ class IndexDatabase:
                     _UPSERT_METADATA,
                     (SCHEMA_VERSION_KEY, str(SCHEMA_VERSION)),
                 )
-                cursor.execute(_CREATE_DOCUMENTS_TABLE)
-                cursor.execute(_CREATE_CHUNKS_TABLE)
-            elif stored_version == "1":
-                cursor.execute(_CREATE_CHUNKS_TABLE)
-                cursor.execute(
-                    _UPSERT_METADATA,
-                    (SCHEMA_VERSION_KEY, str(SCHEMA_VERSION)),
-                )
             elif stored_version != str(SCHEMA_VERSION):
                 raise UnsupportedIndexSchemaError(
                     f"Index database {self.database_path} uses schema version "
                     f"{stored_version}, but version {SCHEMA_VERSION} is "
-                    "required. Rebuild it with: journal-ai index --rebuild"
+                    "required. Rebuild it with: "
+                    "uv run journal-ai index --rebuild"
                 )
-            else:
-                cursor.execute(_CREATE_DOCUMENTS_TABLE)
-                cursor.execute(_CREATE_CHUNKS_TABLE)
+
+            cursor.execute(_CREATE_DOCUMENTS_TABLE)
+            cursor.execute(_CREATE_CHUNKS_TABLE)
 
     def read_documents(self) -> dict[Path, IndexedDocument]:
         """Return every indexed document keyed by its relative path."""
@@ -254,6 +248,15 @@ class IndexDatabase:
 
         return self._parse_timestamp(value)
 
+    def read_chunking_signature(self) -> str | None:
+        """Return the stored chunking-configuration signature, if any."""
+        with self._read_cursor() as cursor:
+            return _fetch_optional_text(
+                cursor,
+                _SELECT_METADATA,
+                (CHUNKING_SIGNATURE_KEY,),
+            )
+
     def apply_changes(
         self,
         *,
@@ -262,12 +265,14 @@ class IndexDatabase:
         updated: Sequence[IndexedDocument] = (),
         deleted: Sequence[Path] = (),
         chunks_by_path: Mapping[Path, tuple[TextChunk, ...]] | None = None,
+        chunking_signature: str | None = None,
     ) -> ChunkChangeCounts:
         """Apply one prepared set of index changes in a single transaction."""
         chunk_map = chunks_by_path or {}
         created = 0
         removed = 0
         timestamp = _format_timestamp(indexed_at)
+        handled_chunk_paths: set[Path] = set()
 
         with self._transaction() as cursor:
             for document in inserted:
@@ -296,6 +301,7 @@ class IndexDatabase:
                     chunks=new_chunks,
                     timestamp=timestamp,
                 )
+                handled_chunk_paths.add(document.relative_path)
 
             for document in updated:
                 cursor.execute(
@@ -323,9 +329,26 @@ class IndexDatabase:
                         chunks=new_chunks,
                         timestamp=timestamp,
                     )
+                    handled_chunk_paths.add(document.relative_path)
+
+            for relative_path, new_chunks in chunk_map.items():
+                if relative_path in handled_chunk_paths:
+                    continue
+
+                document_id = self._require_document_id(cursor, relative_path)
+                removed += self._count_chunks(cursor, document_id)
+                created += self._replace_chunks(
+                    cursor,
+                    document_id=document_id,
+                    chunks=new_chunks,
+                    timestamp=timestamp,
+                )
 
             for relative_path in deleted:
-                deleted_document_id = self._optional_document_id(cursor, relative_path)
+                deleted_document_id = self._optional_document_id(
+                    cursor,
+                    relative_path,
+                )
                 if deleted_document_id is not None:
                     removed += self._count_chunks(cursor, deleted_document_id)
 
@@ -336,6 +359,12 @@ class IndexDatabase:
                 _UPSERT_METADATA,
                 (LAST_INDEXED_AT_KEY, timestamp),
             )
+
+            if chunking_signature is not None:
+                cursor.execute(
+                    _UPSERT_METADATA,
+                    (CHUNKING_SIGNATURE_KEY, chunking_signature),
+                )
 
         return ChunkChangeCounts(created=created, removed=removed)
 

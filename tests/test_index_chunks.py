@@ -13,6 +13,7 @@ from journal_ai.index_database import (
     SCHEMA_VERSION,
     SCHEMA_VERSION_KEY,
     IndexDatabaseError,
+    UnsupportedIndexSchemaError,
     open_index_database,
 )
 from journal_ai.index_service import rebuild_index, update_index
@@ -49,7 +50,7 @@ def test_schema_includes_chunks_table(tmp_path: Path) -> None:
     assert "chunks" in tables
 
 
-def test_schema_version_one_migrates_to_two(tmp_path: Path) -> None:
+def test_schema_version_one_requires_rebuild(tmp_path: Path) -> None:
     database_path = tmp_path / "index.sqlite"
 
     connection = sqlite3.connect(database_path)
@@ -83,8 +84,11 @@ def test_schema_version_one_migrates_to_two(tmp_path: Path) -> None:
     finally:
         connection.close()
 
-    with open_index_database(database_path) as database:
-        assert database.chunk_count() == 0
+    with (
+        pytest.raises(UnsupportedIndexSchemaError, match="index --rebuild"),
+        open_index_database(database_path),
+    ):
+        pass
 
     connection = sqlite3.connect(database_path)
     try:
@@ -101,8 +105,9 @@ def test_schema_version_one_migrates_to_two(tmp_path: Path) -> None:
     finally:
         connection.close()
 
-    assert version == str(SCHEMA_VERSION)
-    assert "chunks" in tables
+    assert version == "1"
+    assert "chunks" not in tables
+    assert SCHEMA_VERSION != 1
 
 
 def test_new_document_creates_chunks(mounted_journal: Path) -> None:
@@ -193,7 +198,6 @@ def test_chunk_indices_are_unique_per_document(mounted_journal: Path) -> None:
     config = ChunkingConfig(
         target_characters=10,
         max_characters=20,
-        minimum_characters=0,
         overlap_characters=0,
     )
 
@@ -245,3 +249,198 @@ def test_failed_chunk_update_rolls_back(tmp_path: Path) -> None:
             )
 
         assert database.chunk_count() == 1
+
+
+def test_changing_max_characters_rechunks_without_content_change(
+    mounted_journal: Path,
+) -> None:
+    content = "Sentence one. " * 80
+    file_path = write_entry(mounted_journal, "journals/entry.md", content)
+    original_bytes = file_path.read_bytes()
+    original_mtime = file_path.stat().st_mtime_ns
+    first_config = ChunkingConfig(
+        target_characters=1000,
+        max_characters=1600,
+        overlap_characters=150,
+    )
+    second_config = ChunkingConfig(
+        target_characters=800,
+        max_characters=800,
+        overlap_characters=150,
+    )
+
+    first = update_index(
+        journal_path=mounted_journal,
+        now=FIRST_RUN,
+        chunking=first_config,
+    )
+    with open_index_database(index_database_path(mounted_journal)) as database:
+        before = database.read_chunks_for_document(
+            database.read_document_ids()[Path("journals/entry.md")]
+        )
+        stored_signature = database.read_chunking_signature()
+
+    second = update_index(
+        journal_path=mounted_journal,
+        now=SECOND_RUN,
+        chunking=second_config,
+    )
+
+    assert first.chunks_total == 1
+    assert second.changed == 0
+    assert second.unchanged == 1
+    assert second.chunks_created > 0
+    assert second.chunks_removed == first.chunks_total
+    assert second.chunks_total > first.chunks_total
+
+    with open_index_database(index_database_path(mounted_journal)) as database:
+        after = database.read_chunks_for_document(
+            database.read_document_ids()[Path("journals/entry.md")]
+        )
+        document = database.read_documents()[Path("journals/entry.md")]
+        assert database.read_chunking_signature() == second_config.signature()
+
+    assert stored_signature == first_config.signature()
+    assert after != before
+    assert document.last_indexed_at == FIRST_RUN
+    assert file_path.read_bytes() == original_bytes
+    assert file_path.stat().st_mtime_ns == original_mtime
+
+    third = update_index(
+        journal_path=mounted_journal,
+        now=SECOND_RUN,
+        chunking=second_config,
+    )
+
+    assert third.changed == 0
+    assert third.chunks_created == 0
+    assert third.chunks_removed == 0
+    assert third.chunks_total == second.chunks_total
+
+
+def test_changing_overlap_rechunks_then_stays_stable(
+    mounted_journal: Path,
+) -> None:
+    content = "x" * 2000
+    write_entry(mounted_journal, "journals/entry.md", content)
+    first_config = ChunkingConfig(
+        target_characters=1000,
+        max_characters=1600,
+        overlap_characters=150,
+    )
+    second_config = ChunkingConfig(
+        target_characters=1000,
+        max_characters=1600,
+        overlap_characters=0,
+    )
+
+    update_index(
+        journal_path=mounted_journal,
+        now=FIRST_RUN,
+        chunking=first_config,
+    )
+    with open_index_database(index_database_path(mounted_journal)) as database:
+        before = database.read_chunks_for_document(
+            database.read_document_ids()[Path("journals/entry.md")]
+        )
+
+    changed_config = update_index(
+        journal_path=mounted_journal,
+        now=SECOND_RUN,
+        chunking=second_config,
+    )
+
+    assert changed_config.changed == 0
+    assert changed_config.unchanged == 1
+    assert changed_config.chunks_created > 0
+    assert changed_config.chunks_removed > 0
+
+    with open_index_database(index_database_path(mounted_journal)) as database:
+        after = database.read_chunks_for_document(
+            database.read_document_ids()[Path("journals/entry.md")]
+        )
+        assert database.read_chunking_signature() == second_config.signature()
+
+    assert after != before
+
+    repeat = update_index(
+        journal_path=mounted_journal,
+        now=SECOND_RUN,
+        chunking=second_config,
+    )
+
+    assert repeat.chunks_created == 0
+    assert repeat.chunks_removed == 0
+    assert repeat.has_changes is False
+
+
+def test_rebuild_stores_current_chunking_signature(
+    mounted_journal: Path,
+) -> None:
+    write_entry(mounted_journal, "journals/entry.md", "Rebuild me.")
+    first_config = ChunkingConfig(target_characters=1000, max_characters=1600)
+    second_config = ChunkingConfig(target_characters=800, max_characters=800)
+
+    update_index(
+        journal_path=mounted_journal,
+        now=FIRST_RUN,
+        chunking=first_config,
+    )
+    result = rebuild_index(
+        journal_path=mounted_journal,
+        now=SECOND_RUN,
+        chunking=second_config,
+    )
+
+    assert result.new == 1
+    assert result.chunks_total >= 1
+
+    with open_index_database(index_database_path(mounted_journal)) as database:
+        assert database.read_chunking_signature() == second_config.signature()
+
+
+def test_failed_configuration_driven_rechunking_rolls_back(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "index.sqlite"
+    relative_path = Path("journals/entry.md")
+    document = IndexedDocument(
+        relative_path=relative_path,
+        content_hash="hash",
+        file_size=4,
+        modified_at=FIRST_RUN,
+        first_indexed_at=FIRST_RUN,
+        last_indexed_at=FIRST_RUN,
+    )
+    chunk = chunk_markdown("ok", ChunkingConfig())[0]
+    duplicate = TextChunk(
+        chunk_index=0,
+        content=chunk.content,
+        content_hash=chunk.content_hash,
+        start_line=chunk.start_line,
+        end_line=chunk.end_line,
+        character_count=chunk.character_count,
+    )
+
+    with open_index_database(database_path) as database:
+        database.apply_changes(
+            indexed_at=FIRST_RUN,
+            inserted=[document],
+            chunks_by_path={relative_path: (chunk,)},
+            chunking_signature="old-signature",
+        )
+
+        with pytest.raises(IndexDatabaseError):
+            database.apply_changes(
+                indexed_at=SECOND_RUN,
+                chunks_by_path={relative_path: (duplicate, duplicate)},
+                chunking_signature="new-signature",
+            )
+
+        assert database.read_chunking_signature() == "old-signature"
+        assert database.chunk_count() == 1
+        stored = database.read_chunks_for_document(
+            database.read_document_ids()[relative_path]
+        )
+        assert stored[0].content == chunk.content
+        assert database.read_last_indexed_at() == FIRST_RUN

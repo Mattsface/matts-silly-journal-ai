@@ -208,7 +208,7 @@ def test_unsupported_schema_version_is_rejected(tmp_path: Path) -> None:
         connection.close()
 
     with (
-        pytest.raises(UnsupportedIndexSchemaError, match="schema version 99"),
+        pytest.raises(UnsupportedIndexSchemaError, match="index --rebuild"),
         open_index_database(database_path),
     ):
         pass

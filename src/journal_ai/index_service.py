@@ -105,10 +105,16 @@ def update_index(
             database.read_documents(),
             indexed_at=indexed_at,
         )
+        current_signature = chunking_config.signature()
+        paths_to_chunk = {
+            document.relative_path for document in plan.inserted + plan.changed
+        }
+        if database.read_chunking_signature() != current_signature:
+            paths_to_chunk.update(plan.unchanged)
 
-        chunks_by_path = _chunks_for_updated_documents(
+        chunks_by_path = _chunks_for_documents(
             resolved_journal_path,
-            plan,
+            paths_to_chunk,
             chunking_config,
         )
 
@@ -118,6 +124,7 @@ def update_index(
             updated=plan.changed + plan.refreshed,
             deleted=plan.deleted,
             chunks_by_path=chunks_by_path,
+            chunking_signature=current_signature,
         )
 
         total_chunks = database.chunk_count()
@@ -186,18 +193,15 @@ def read_index_status(
         )
 
 
-def _chunks_for_updated_documents(
+def _chunks_for_documents(
     journal_path: Path,
-    plan: _IndexPlan,
+    relative_paths: Iterable[Path],
     chunking: ChunkingConfig,
 ) -> dict[Path, tuple[TextChunk, ...]]:
-    """Read and chunk only documents that are new or content-changed."""
-    paths = {
-        document.relative_path for document in plan.inserted + plan.changed
-    }
+    """Read and chunk the given documents, leaving others unread."""
     chunks_by_path: dict[Path, tuple[TextChunk, ...]] = {}
 
-    for relative_path in sorted(paths):
+    for relative_path in sorted(relative_paths):
         file_path = journal_path / relative_path
         document = read_markdown_file(file_path, journal_path)
         chunks_by_path[relative_path] = chunk_markdown(
