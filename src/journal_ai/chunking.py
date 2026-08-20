@@ -13,6 +13,15 @@ _HEADING_PATTERN = re.compile(r"^#{1,6}\s")
 _TOP_LEVEL_BULLET_PATTERN = re.compile(r"^-\s")
 _SENTENCE_BOUNDARY_PATTERN = re.compile(r"(?<=[.!?])\s+")
 
+# Version of the chunk boundary behavior in this module. It is part of the
+# stored chunking signature, so raising it re-chunks documents that are
+# already indexed even when their content and settings are unchanged.
+#
+# Bump it by hand whenever a change here would produce different chunk
+# boundaries for the same source text. Never infer or increment it
+# automatically.
+CHUNKING_ALGORITHM_VERSION = 1
+
 
 @dataclass(frozen=True, slots=True)
 class _SourceBlock:
@@ -39,6 +48,21 @@ def chunk_markdown(text: str, config: ChunkingConfig) -> tuple[TextChunk, ...]:
     sized_blocks = _enforce_max_size(blocks, text, config)
     merged_blocks = _merge_small_blocks(sized_blocks, text, config)
     return _blocks_to_chunks(merged_blocks, text)
+
+
+def chunking_signature(config: ChunkingConfig) -> str:
+    """Return a stable identifier for the active chunking behavior.
+
+    The signature covers the algorithm version and every configuration
+    value that affects chunk boundaries. Indexing re-chunks stored
+    documents whenever it differs from the signature in the database.
+    """
+    return (
+        f"algorithm_version={CHUNKING_ALGORITHM_VERSION};"
+        f"target_characters={config.target_characters};"
+        f"max_characters={config.max_characters};"
+        f"overlap_characters={config.overlap_characters}"
+    )
 
 
 def _line_start_offsets(text: str) -> list[int]:
@@ -272,21 +296,15 @@ def _split_oversized_block(
 
 
 def _split_text_ranges(content: str, config: ChunkingConfig) -> list[tuple[int, int]]:
-    if len(content) <= config.max_characters:
-        return [(0, len(content))]
-
-    line_spans = _line_spans(content)
-    if len(line_spans) > 1:
-        return _pack_span_ranges(line_spans, content, config)
-
-    sentence_spans = _sentence_spans(content)
-    if len(sentence_spans) > 1:
-        return _pack_span_ranges(sentence_spans, content, config)
-
-    return _pack_span_ranges([(0, len(content))], content, config)
+    return _split_span((0, len(content)), content, config)
 
 
 def _line_spans(content: str) -> list[tuple[int, int]]:
+    """Return contiguous spans covering one source line each.
+
+    Each span keeps its own line ending, so the spans tile the content
+    without gaps.
+    """
     spans: list[tuple[int, int]] = []
     position = 0
 
@@ -299,12 +317,16 @@ def _line_spans(content: str) -> list[tuple[int, int]]:
 
 
 def _sentence_spans(content: str) -> list[tuple[int, int]]:
+    """Return contiguous spans covering one sentence each.
+
+    A span keeps the whitespace that follows its sentence, so the spans
+    tile the content without gaps just as line spans do.
+    """
     spans: list[tuple[int, int]] = []
     start = 0
 
     for match in _SENTENCE_BOUNDARY_PATTERN.finditer(content):
-        end = match.start() + 1
-        spans.append((start, end))
+        spans.append((start, match.end()))
         start = match.end()
 
     if start < len(content):
@@ -344,19 +366,27 @@ def _split_span(
     content: str,
     config: ChunkingConfig,
 ) -> list[tuple[int, int]]:
+    """Split one oversized span at the most semantic boundary available.
+
+    Sentence boundaries are preferred over line boundaries, because a
+    sentence is a better semantic unit than an arbitrary Markdown line
+    break. Fixed character ranges remain the final fallback for content
+    that offers neither. Every branch keeps source order and produces
+    contiguous ranges, so no source text is lost.
+    """
     start, end = span
     piece = content[start:end]
     if len(piece) <= config.max_characters:
         return [span]
 
-    line_spans = _line_spans(piece)
-    if len(line_spans) > 1:
-        adjusted = [(start + line_start, start + line_end) for line_start, line_end in line_spans]
-        return _pack_span_ranges(adjusted, content, config)
+    for candidate_spans in (_sentence_spans(piece), _line_spans(piece)):
+        if len(candidate_spans) <= 1:
+            continue
 
-    sentence_spans = _sentence_spans(piece)
-    if len(sentence_spans) > 1:
-        adjusted = [(start + sentence_start, start + sentence_end) for sentence_start, sentence_end in sentence_spans]
+        adjusted = [
+            (start + span_start, start + span_end)
+            for span_start, span_end in candidate_spans
+        ]
         return _pack_span_ranges(adjusted, content, config)
 
     return _character_span_ranges(start, end, config)

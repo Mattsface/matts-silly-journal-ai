@@ -6,7 +6,13 @@ from pathlib import Path
 
 import pytest
 
-from journal_ai.chunking import chunk_markdown
+from journal_ai import chunking as chunking_module
+from journal_ai import index_service
+from journal_ai.chunking import (
+    CHUNKING_ALGORITHM_VERSION,
+    chunk_markdown,
+    chunking_signature,
+)
 from journal_ai.config import ChunkingConfig, index_database_path
 from journal_ai.hashing import hash_text
 from journal_ai.index_database import (
@@ -298,9 +304,9 @@ def test_changing_max_characters_rechunks_without_content_change(
             database.read_document_ids()[Path("journals/entry.md")]
         )
         document = database.read_documents()[Path("journals/entry.md")]
-        assert database.read_chunking_signature() == second_config.signature()
+        assert database.read_chunking_signature() == chunking_signature(second_config)
 
-    assert stored_signature == first_config.signature()
+    assert stored_signature == chunking_signature(first_config)
     assert after != before
     assert document.last_indexed_at == FIRST_RUN
     assert file_path.read_bytes() == original_bytes
@@ -359,7 +365,7 @@ def test_changing_overlap_rechunks_then_stays_stable(
         after = database.read_chunks_for_document(
             database.read_document_ids()[Path("journals/entry.md")]
         )
-        assert database.read_chunking_signature() == second_config.signature()
+        assert database.read_chunking_signature() == chunking_signature(second_config)
 
     assert after != before
 
@@ -396,7 +402,137 @@ def test_rebuild_stores_current_chunking_signature(
     assert result.chunks_total >= 1
 
     with open_index_database(index_database_path(mounted_journal)) as database:
-        assert database.read_chunking_signature() == second_config.signature()
+        assert database.read_chunking_signature() == chunking_signature(second_config)
+
+
+def test_chunking_signature_includes_the_algorithm_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = ChunkingConfig()
+    signature = chunking_signature(config)
+
+    assert f"algorithm_version={CHUNKING_ALGORITHM_VERSION};" in signature
+    assert signature == chunking_signature(config)
+
+    monkeypatch.setattr(
+        chunking_module,
+        "CHUNKING_ALGORITHM_VERSION",
+        CHUNKING_ALGORITHM_VERSION + 1,
+    )
+
+    assert chunking_signature(config) != signature
+
+
+def test_algorithm_version_change_rechunks_without_content_change(
+    mounted_journal: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    content = "Sentence one. " * 80
+    file_path = write_entry(mounted_journal, "journals/entry.md", content)
+    original_bytes = file_path.read_bytes()
+    original_mtime = file_path.stat().st_mtime_ns
+    config = ChunkingConfig(
+        target_characters=200,
+        max_characters=300,
+        overlap_characters=0,
+    )
+
+    first = update_index(
+        journal_path=mounted_journal,
+        now=FIRST_RUN,
+        chunking=config,
+    )
+    with open_index_database(index_database_path(mounted_journal)) as database:
+        assert database.read_chunking_signature() == chunking_signature(config)
+
+    monkeypatch.setattr(
+        chunking_module,
+        "CHUNKING_ALGORITHM_VERSION",
+        CHUNKING_ALGORITHM_VERSION + 1,
+    )
+
+    second = update_index(
+        journal_path=mounted_journal,
+        now=SECOND_RUN,
+        chunking=config,
+    )
+
+    # The same settings and the same source content, so only the algorithm
+    # version invalidated the stored chunks.
+    assert second.changed == 0
+    assert second.unchanged == 1
+    assert second.chunks_removed == first.chunks_total
+    assert second.chunks_created == first.chunks_total
+    assert second.chunks_total == first.chunks_total
+
+    with open_index_database(index_database_path(mounted_journal)) as database:
+        assert database.read_chunking_signature() == chunking_signature(config)
+        document = database.read_documents()[Path("journals/entry.md")]
+
+    assert document.last_indexed_at == FIRST_RUN
+    assert file_path.read_bytes() == original_bytes
+    assert file_path.stat().st_mtime_ns == original_mtime
+
+    third = update_index(
+        journal_path=mounted_journal,
+        now=SECOND_RUN,
+        chunking=config,
+    )
+
+    assert third.changed == 0
+    assert third.chunks_created == 0
+    assert third.chunks_removed == 0
+    assert third.chunks_total == second.chunks_total
+
+
+def test_failed_rechunk_after_algorithm_bump_keeps_stored_signature(
+    mounted_journal: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_entry(mounted_journal, "journals/entry.md", "Sentence one. " * 40)
+    config = ChunkingConfig()
+
+    update_index(journal_path=mounted_journal, now=FIRST_RUN, chunking=config)
+    with open_index_database(index_database_path(mounted_journal)) as database:
+        stored_signature = database.read_chunking_signature()
+        before = database.read_chunks_for_document(
+            database.read_document_ids()[Path("journals/entry.md")]
+        )
+
+    monkeypatch.setattr(
+        chunking_module,
+        "CHUNKING_ALGORITHM_VERSION",
+        CHUNKING_ALGORITHM_VERSION + 1,
+    )
+
+    def failing_chunk_markdown(
+        text: str,
+        chunking: ChunkingConfig,
+    ) -> tuple[TextChunk, ...]:
+        raise RuntimeError("chunking failed")
+
+    monkeypatch.setattr(
+        index_service,
+        "chunk_markdown",
+        failing_chunk_markdown,
+    )
+
+    with pytest.raises(RuntimeError):
+        update_index(
+            journal_path=mounted_journal,
+            now=SECOND_RUN,
+            chunking=config,
+        )
+
+    with open_index_database(index_database_path(mounted_journal)) as database:
+        assert database.read_chunking_signature() == stored_signature
+        assert database.read_last_indexed_at() == FIRST_RUN
+        assert (
+            database.read_chunks_for_document(
+                database.read_document_ids()[Path("journals/entry.md")]
+            )
+            == before
+        )
 
 
 def test_failed_configuration_driven_rechunking_rolls_back(

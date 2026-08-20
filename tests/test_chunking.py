@@ -135,6 +135,59 @@ def test_oversized_paragraph_splits_without_loss() -> None:
     assert joined_chunks(text, config) == text
 
 
+def test_oversized_block_prefers_sentence_over_line_boundaries() -> None:
+    sentence = "Word word word word word."
+    line = f"{sentence} {sentence}"
+    text = f"{line}\n{line}\n{line}"
+    config = default_config(target_characters=70, max_characters=80)
+
+    chunks = chunk_markdown(text, config)
+
+    # Line boundaries alone would fit only one 51-character line per chunk.
+    # Sentence boundaries pack three sentences per chunk instead, so a chunk
+    # both crosses a line break and ends in the middle of a line.
+    assert len(chunks) == 2
+    assert all(chunk.character_count <= config.max_characters for chunk in chunks)
+    assert all(chunk.content.strip().endswith(".") for chunk in chunks)
+    assert "\n" in chunks[0].content
+    assert chunks[0].content.count(sentence) == 3
+    assert not chunks[0].content.endswith("\n")
+    assert joined_chunks(text, config) == text
+
+
+def test_sentence_split_records_one_based_lines_across_a_line_break() -> None:
+    sentence = "Word word word word word."
+    line = f"{sentence} {sentence}"
+    text = f"{line}\n{line}\n{line}"
+    config = default_config(target_characters=70, max_characters=80)
+
+    chunks = chunk_markdown(text, config)
+
+    assert (chunks[0].start_line, chunks[0].end_line) == (1, 2)
+    assert (chunks[1].start_line, chunks[1].end_line) == (2, 3)
+
+
+def test_oversized_block_falls_back_to_lines_without_sentences() -> None:
+    line = "alpha beta gamma delta epsilon zeta eta theta"
+    text = "\n".join([line] * 6)
+    config = default_config(target_characters=80, max_characters=100)
+
+    chunks = chunk_markdown(text, config)
+
+    assert len(chunks) > 1
+    assert all(chunk.character_count <= config.max_characters for chunk in chunks)
+    assert all(chunk.content.endswith("\n") for chunk in chunks[:-1])
+    assert joined_chunks(text, config) == text
+
+
+def test_sentence_preference_is_deterministic() -> None:
+    sentence = "Word word word word word."
+    text = "\n".join([f"{sentence} {sentence}"] * 5)
+    config = default_config(target_characters=70, max_characters=80)
+
+    assert chunk_markdown(text, config) == chunk_markdown(text, config)
+
+
 def test_long_unbroken_string_splits_by_character() -> None:
     text = "x" * 500
     config = default_config(

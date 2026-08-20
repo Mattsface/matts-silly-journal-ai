@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from journal_ai.chunking import chunk_markdown
+from journal_ai.chunking import chunk_markdown, chunking_signature
 from journal_ai.config import ChunkingConfig, index_database_path
 from journal_ai.hashing import hash_file
 from journal_ai.index_database import (
@@ -105,13 +105,19 @@ def update_index(
             database.read_documents(),
             indexed_at=indexed_at,
         )
-        current_signature = chunking_config.signature()
+        current_signature = chunking_signature(chunking_config)
         paths_to_chunk = {
             document.relative_path for document in plan.inserted + plan.changed
         }
+        # A different signature means the chunking settings or the chunking
+        # algorithm changed, so stored chunks no longer describe the current
+        # behavior. Those documents are re-chunked while still being
+        # reported as unchanged source files.
         if database.read_chunking_signature() != current_signature:
             paths_to_chunk.update(plan.unchanged)
 
+        # Chunking every affected document before apply_changes keeps a
+        # failed re-chunk from ever storing the new signature.
         chunks_by_path = _chunks_for_documents(
             resolved_journal_path,
             paths_to_chunk,

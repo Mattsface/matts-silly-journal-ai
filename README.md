@@ -375,7 +375,7 @@ For each Markdown file the index stores:
 | `first_indexed_at` | When the file first entered the index, UTC |
 | `last_indexed_at` | When the stored record was last written, UTC |
 
-A second table, `index_metadata`, holds the schema version, the time of the last successful index run, and a `chunking_signature` that records the chunking settings used to build the stored chunks.
+A second table, `index_metadata`, holds the schema version, the time of the last successful index run, and a `chunking_signature` that records the chunking algorithm version and the chunking settings used to build the stored chunks.
 
 A third table, `chunks`, stores deterministic segments of each source Markdown file. Each chunk row links to a document through `document_id`, includes inclusive one-based `start_line` and `end_line` values, a SHA-256 `content_hash`, and the exact chunk text as it appears in the source file.
 
@@ -387,16 +387,24 @@ A third table, `chunks`, stores deterministic segments of each source Markdown f
 
 ### Chunking rules (high level)
 
-During `journal-ai index`, new and content-changed Markdown files are read once, divided into deterministic chunks, and written to SQLite. Unchanged files keep their existing chunk rows unless the chunking configuration has changed.
+During `journal-ai index`, new and content-changed Markdown files are read once, divided into deterministic chunks, and written to SQLite. Unchanged files keep their existing chunk rows unless the chunking signature has changed.
 
-The index stores a `chunking_signature` derived from `target_characters`, `max_characters`, and `overlap_characters`. The same source content and the same chunking settings leave existing chunks untouched. Changing those settings re-chunks currently indexed source documents without classifying them as content-changed. `minimum_characters` is not a supported setting.
+The index stores a `chunking_signature` of the form:
+
+```
+algorithm_version=1;target_characters=1000;max_characters=1600;overlap_characters=150
+```
+
+The same source content, the same chunking settings, and the same algorithm version leave existing chunks untouched. Changing any of them re-chunks currently indexed source documents without classifying them as content-changed. `minimum_characters` is not a supported setting.
+
+`algorithm_version` comes from `CHUNKING_ALGORITHM_VERSION` in `src/journal_ai/chunking.py`. It is never inferred or incremented automatically: a change to how chunk boundaries are chosen must bump that constant by hand so already-indexed documents are re-chunked with the new behavior.
 
 Structural boundaries are preferred in this order:
 
 1. Markdown headings stay with the content below them when possible.
 2. Blank-line-separated paragraphs.
 3. Logseq top-level bullets, keeping nested child bullets with their parent when they fit.
-4. Sentences, lines, or character positions only when a block exceeds the configured maximum size.
+4. Sentences, then lines, then character positions, only when a block exceeds the configured maximum size. Sentences are preferred over line breaks because a sentence is the better semantic unit; fixed character ranges are the final fallback.
 
 Overlap is used only when oversized content must be split; it is not added between normal sections.
 
@@ -504,7 +512,7 @@ Each indexed run compares the files it discovers with the records already stored
 
 The content hash is authoritative. File size and modification time are stored as metadata and are refreshed when they drift, but they never decide that content changed. Touching a file, or restoring it from a backup, therefore leaves it classified as unchanged and does not mark it for reprocessing.
 
-Changing chunking configuration is tracked separately through `chunking_signature`. It can replace stored chunks without classifying the source files as content-changed.
+Changing chunking configuration or the chunking algorithm version is tracked separately through `chunking_signature`. It can replace stored chunks without classifying the source files as content-changed.
 
 All inserts, updates, deletions, chunk replacements, and signature writes for one run are applied inside a single SQLite transaction. If any statement fails, the whole run is rolled back and the index is left exactly as it was.
 

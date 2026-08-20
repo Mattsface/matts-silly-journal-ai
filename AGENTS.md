@@ -151,7 +151,9 @@ Rules for future work:
 
 Markdown Chunking
 
-Chunking divides each source Markdown file into deterministic, source-linked segments stored in the chunks table. Chunking lives in src/journal_ai/chunking.py and runs during journal-ai index for new and content-changed documents, and for existing documents when the stored chunking configuration signature no longer matches.
+Chunking divides each source Markdown file into deterministic, source-linked segments stored in the chunks table. Chunking lives in src/journal_ai/chunking.py and runs during journal-ai index for new and content-changed documents, and for existing documents when the stored chunking signature no longer matches.
+
+The signature is built by chunking_signature in src/journal_ai/chunking.py from CHUNKING_ALGORITHM_VERSION and the ChunkingConfig values that affect chunk boundaries.
 
 Rules for future work:
 
@@ -160,11 +162,13 @@ Rules for future work:
 3. Every chunk record must stay linked to its source document through document_id.
 4. Unchanged documents must not be re-chunked unnecessarily.
 5. Changing chunking settings must re-chunk currently indexed source documents without classifying them as content-changed. Track the active settings as derived index metadata such as chunking_signature.
-6. Chunking is structural processing only. It must not summarize, interpret, or rewrite journal content.
-7. Deleting or rebuilding the index must never delete, move, or modify journal source files.
-8. Future embeddings must reference stable chunk records rather than re-parsing ad hoc.
-9. Chunking must not contact Ollama, embeddings APIs, or any network service.
-10. Do not reintroduce unused size settings such as minimum_characters.
+6. Bump CHUNKING_ALGORITHM_VERSION by hand whenever chunk boundary behavior changes, so already-indexed documents are re-chunked through the same chunking_signature path. Never infer or increment it automatically, and do not add a version-management system around it.
+7. Chunking is structural processing only. It must not summarize, interpret, or rewrite journal content.
+8. Oversized content falls back to sentence boundaries first, then line boundaries, then character positions. Keep that order wherever oversized content is split.
+9. Deleting or rebuilding the index must never delete, move, or modify journal source files.
+10. Future embeddings must reference stable chunk records rather than re-parsing ad hoc.
+11. Chunking must not contact Ollama, embeddings APIs, or any network service.
+12. Do not reintroduce unused size settings such as minimum_characters.
 
 Ollama Behavior
 
@@ -257,6 +261,8 @@ Important cases include:
 * New, changed, unchanged, and deleted classification
 * Timestamp-only changes staying unchanged
 * Chunking configuration changes re-chunking without content-change classification
+* Chunking algorithm version changes re-chunking without content-change classification
+* Oversized content preferring sentence boundaries over line breaks
 * Rolled-back index updates
 * Index rebuild
 * Index status without a database

@@ -95,14 +95,6 @@ class ChunkingConfig:
                 "chunking.max_characters"
             )
 
-    def signature(self) -> str:
-        """Return a stable identifier for settings that affect chunk bounds."""
-        return (
-            f"target_characters={self.target_characters};"
-            f"max_characters={self.max_characters};"
-            f"overlap_characters={self.overlap_characters}"
-        )
-
 
 @dataclass(frozen=True, slots=True)
 class OllamaConfig:
