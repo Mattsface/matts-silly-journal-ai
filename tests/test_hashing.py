@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from journal_ai.hashing import HashingError, hash_file
+from journal_ai.hashing import HashingError, hash_file, hash_text
 
 
 def test_hash_file_matches_sha256_of_bytes(tmp_path: Path) -> None:
@@ -44,6 +44,12 @@ def test_different_content_hashes_differently(tmp_path: Path) -> None:
     second.write_text("Another thing.", encoding="utf-8")
 
     assert hash_file(first) != hash_file(second)
+
+
+def test_hash_text_matches_sha256_of_utf8() -> None:
+    assert hash_text("Today was calm.") == hashlib.sha256(
+        b"Today was calm."
+    ).hexdigest()
 
 
 def test_unreadable_file_raises_hashing_error(tmp_path: Path) -> None:

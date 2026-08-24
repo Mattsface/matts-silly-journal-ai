@@ -5,7 +5,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from journal_ai.config import index_database_path
+from journal_ai.chunking import chunk_markdown, chunking_signature
+from journal_ai.config import ChunkingConfig, index_database_path
 from journal_ai.hashing import hash_file
 from journal_ai.index_database import (
     delete_index_database,
@@ -15,12 +16,14 @@ from journal_ai.journal_reader import (
     JournalReadError,
     ensure_journal_mounted,
     find_markdown_files,
+    read_markdown_file,
 )
 from journal_ai.models import (
     IndexedDocument,
     IndexResult,
     IndexStatus,
     SourceFileState,
+    TextChunk,
 )
 
 
@@ -86,11 +89,13 @@ def update_index(
     journal_path: Path,
     database_path: Path | None = None,
     now: datetime | None = None,
+    chunking: ChunkingConfig | None = None,
 ) -> IndexResult:
     """Scan the journal and bring the SQLite index up to date."""
     resolved_journal_path = journal_path.expanduser().resolve()
     target_path = database_path or index_database_path(resolved_journal_path)
     indexed_at = _as_utc(now)
+    chunking_config = chunking or ChunkingConfig()
 
     sources = scan_journal(resolved_journal_path)
 
@@ -100,13 +105,35 @@ def update_index(
             database.read_documents(),
             indexed_at=indexed_at,
         )
+        current_signature = chunking_signature(chunking_config)
+        paths_to_chunk = {
+            document.relative_path for document in plan.inserted + plan.changed
+        }
+        # A different signature means the chunking settings or the chunking
+        # algorithm changed, so stored chunks no longer describe the current
+        # behavior. Those documents are re-chunked while still being
+        # reported as unchanged source files.
+        if database.read_chunking_signature() != current_signature:
+            paths_to_chunk.update(plan.unchanged)
 
-        database.apply_changes(
+        # Chunking every affected document before apply_changes keeps a
+        # failed re-chunk from ever storing the new signature.
+        chunks_by_path = _chunks_for_documents(
+            resolved_journal_path,
+            paths_to_chunk,
+            chunking_config,
+        )
+
+        chunk_counts = database.apply_changes(
             indexed_at=indexed_at,
             inserted=plan.inserted,
             updated=plan.changed + plan.refreshed,
             deleted=plan.deleted,
+            chunks_by_path=chunks_by_path,
+            chunking_signature=current_signature,
         )
+
+        total_chunks = database.chunk_count()
 
     return IndexResult(
         new_paths=tuple(
@@ -117,6 +144,9 @@ def update_index(
         ),
         unchanged_paths=plan.unchanged,
         deleted_paths=plan.deleted,
+        chunks_created=chunk_counts.created,
+        chunks_removed=chunk_counts.removed,
+        chunks_total=total_chunks,
     )
 
 
@@ -125,6 +155,7 @@ def rebuild_index(
     journal_path: Path,
     database_path: Path | None = None,
     now: datetime | None = None,
+    chunking: ChunkingConfig | None = None,
 ) -> IndexResult:
     """Delete the existing index and build a new one from source files."""
     resolved_journal_path = ensure_journal_mounted(journal_path)
@@ -136,6 +167,7 @@ def rebuild_index(
         journal_path=resolved_journal_path,
         database_path=target_path,
         now=now,
+        chunking=chunking,
     )
 
 
@@ -153,6 +185,7 @@ def read_index_status(
             database_path=target_path,
             database_exists=False,
             document_count=0,
+            chunk_count=0,
             last_indexed_at=None,
         )
 
@@ -161,8 +194,28 @@ def read_index_status(
             database_path=target_path,
             database_exists=True,
             document_count=database.document_count(),
+            chunk_count=database.chunk_count(),
             last_indexed_at=database.read_last_indexed_at(),
         )
+
+
+def _chunks_for_documents(
+    journal_path: Path,
+    relative_paths: Iterable[Path],
+    chunking: ChunkingConfig,
+) -> dict[Path, tuple[TextChunk, ...]]:
+    """Read and chunk the given documents, leaving others unread."""
+    chunks_by_path: dict[Path, tuple[TextChunk, ...]] = {}
+
+    for relative_path in sorted(relative_paths):
+        file_path = journal_path / relative_path
+        document = read_markdown_file(file_path, journal_path)
+        chunks_by_path[relative_path] = chunk_markdown(
+            document.content,
+            chunking,
+        )
+
+    return chunks_by_path
 
 
 def _plan_changes(

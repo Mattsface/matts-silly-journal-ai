@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from journal_ai.models import IndexedDocument
+from journal_ai.models import DocumentChunk, IndexedDocument, TextChunk
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA_VERSION_KEY = "schema_version"
 LAST_INDEXED_AT_KEY = "last_indexed_at"
+CHUNKING_SIGNATURE_KEY = "chunking_signature"
 
 # SQLite may keep a write-ahead log and a shared-memory file beside the
 # database. They must be removed together with it during a rebuild.
@@ -36,8 +38,28 @@ CREATE TABLE IF NOT EXISTS documents (
 )
 """
 
+_CREATE_CHUNKS_TABLE = """
+CREATE TABLE IF NOT EXISTS chunks (
+    id INTEGER PRIMARY KEY,
+    document_id INTEGER NOT NULL,
+    chunk_index INTEGER NOT NULL,
+    content TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    start_line INTEGER NOT NULL,
+    end_line INTEGER NOT NULL,
+    character_count INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (document_id)
+        REFERENCES documents(id)
+        ON DELETE CASCADE,
+    UNIQUE(document_id, chunk_index)
+)
+"""
+
 _SELECT_DOCUMENTS = """
 SELECT
+    id,
     relative_path,
     content_hash,
     file_size,
@@ -71,12 +93,54 @@ WHERE relative_path = ?
 
 _DELETE_DOCUMENT = "DELETE FROM documents WHERE relative_path = ?"
 
+_SELECT_DOCUMENT_ID = "SELECT id FROM documents WHERE relative_path = ?"
+
+_DELETE_CHUNKS_FOR_DOCUMENT = "DELETE FROM chunks WHERE document_id = ?"
+
+_INSERT_CHUNK = """
+INSERT INTO chunks (
+    document_id,
+    chunk_index,
+    content,
+    content_hash,
+    start_line,
+    end_line,
+    character_count,
+    created_at,
+    updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+"""
+
+_SELECT_CHUNKS_FOR_DOCUMENT = """
+SELECT
+    document_id,
+    chunk_index,
+    content,
+    content_hash,
+    start_line,
+    end_line,
+    character_count
+FROM chunks
+WHERE document_id = ?
+ORDER BY chunk_index
+"""
+
+_COUNT_CHUNKS = "SELECT COUNT(*) FROM chunks"
+
 _UPSERT_METADATA = """
 INSERT INTO index_metadata (key, value) VALUES (?, ?)
 ON CONFLICT(key) DO UPDATE SET value = excluded.value
 """
 
 _SELECT_METADATA = "SELECT value FROM index_metadata WHERE key = ?"
+
+
+@dataclass(frozen=True, slots=True)
+class ChunkChangeCounts:
+    """How many chunk rows were added or removed in one index transaction."""
+
+    created: int
+    removed: int
 
 
 class IndexDatabaseError(Exception):
@@ -122,10 +186,12 @@ class IndexDatabase:
                 raise UnsupportedIndexSchemaError(
                     f"Index database {self.database_path} uses schema version "
                     f"{stored_version}, but version {SCHEMA_VERSION} is "
-                    "required. Rebuild it with: journal-ai index --rebuild"
+                    "required. Rebuild it with: "
+                    "uv run journal-ai index --rebuild"
                 )
 
             cursor.execute(_CREATE_DOCUMENTS_TABLE)
+            cursor.execute(_CREATE_CHUNKS_TABLE)
 
     def read_documents(self) -> dict[Path, IndexedDocument]:
         """Return every indexed document keyed by its relative path."""
@@ -135,12 +201,38 @@ class IndexDatabase:
         documents = (self._row_to_document(row) for row in rows)
         return {document.relative_path: document for document in documents}
 
+    def read_document_ids(self) -> dict[Path, int]:
+        """Return database ids for every indexed document."""
+        with self._read_cursor() as cursor:
+            rows = cursor.execute(
+                "SELECT id, relative_path FROM documents ORDER BY relative_path"
+            ).fetchall()
+
+        return {Path(row[1]): int(row[0]) for row in rows}
+
     def document_count(self) -> int:
         """Return how many documents the index currently tracks."""
         with self._read_cursor() as cursor:
             row = cursor.execute("SELECT COUNT(*) FROM documents").fetchone()
 
         return int(row[0])
+
+    def chunk_count(self) -> int:
+        """Return how many chunk rows the index currently stores."""
+        with self._read_cursor() as cursor:
+            row = cursor.execute(_COUNT_CHUNKS).fetchone()
+
+        return int(row[0])
+
+    def read_chunks_for_document(self, document_id: int) -> tuple[DocumentChunk, ...]:
+        """Return stored chunks for one document, ordered by chunk_index."""
+        with self._read_cursor() as cursor:
+            rows = cursor.execute(
+                _SELECT_CHUNKS_FOR_DOCUMENT,
+                (document_id,),
+            ).fetchall()
+
+        return tuple(self._row_to_chunk(row) for row in rows)
 
     def read_last_indexed_at(self) -> datetime | None:
         """Return when the last successful index run finished."""
@@ -156,6 +248,15 @@ class IndexDatabase:
 
         return self._parse_timestamp(value)
 
+    def read_chunking_signature(self) -> str | None:
+        """Return the stored chunking-configuration signature, if any."""
+        with self._read_cursor() as cursor:
+            return _fetch_optional_text(
+                cursor,
+                _SELECT_METADATA,
+                (CHUNKING_SIGNATURE_KEY,),
+            )
+
     def apply_changes(
         self,
         *,
@@ -163,8 +264,16 @@ class IndexDatabase:
         inserted: Sequence[IndexedDocument] = (),
         updated: Sequence[IndexedDocument] = (),
         deleted: Sequence[Path] = (),
-    ) -> None:
+        chunks_by_path: Mapping[Path, tuple[TextChunk, ...]] | None = None,
+        chunking_signature: str | None = None,
+    ) -> ChunkChangeCounts:
         """Apply one prepared set of index changes in a single transaction."""
+        chunk_map = chunks_by_path or {}
+        created = 0
+        removed = 0
+        timestamp = _format_timestamp(indexed_at)
+        handled_chunk_paths: set[Path] = set()
+
         with self._transaction() as cursor:
             for document in inserted:
                 cursor.execute(
@@ -178,6 +287,21 @@ class IndexDatabase:
                         _format_timestamp(document.last_indexed_at),
                     ),
                 )
+                row_id = cursor.lastrowid
+                if row_id is None:
+                    raise IndexDatabaseError(
+                        "Insert did not return a document id for "
+                        f"{document.relative_path.as_posix()}"
+                    )
+                document_id = int(row_id)
+                new_chunks = chunk_map.get(document.relative_path, ())
+                created += self._replace_chunks(
+                    cursor,
+                    document_id=document_id,
+                    chunks=new_chunks,
+                    timestamp=timestamp,
+                )
+                handled_chunk_paths.add(document.relative_path)
 
             for document in updated:
                 cursor.execute(
@@ -192,14 +316,120 @@ class IndexDatabase:
                 )
                 self._require_one_row(cursor, "update", document.relative_path)
 
+                if document.relative_path in chunk_map:
+                    document_id = self._require_document_id(
+                        cursor,
+                        document.relative_path,
+                    )
+                    removed += self._count_chunks(cursor, document_id)
+                    new_chunks = chunk_map[document.relative_path]
+                    created += self._replace_chunks(
+                        cursor,
+                        document_id=document_id,
+                        chunks=new_chunks,
+                        timestamp=timestamp,
+                    )
+                    handled_chunk_paths.add(document.relative_path)
+
+            for relative_path, new_chunks in chunk_map.items():
+                if relative_path in handled_chunk_paths:
+                    continue
+
+                document_id = self._require_document_id(cursor, relative_path)
+                removed += self._count_chunks(cursor, document_id)
+                created += self._replace_chunks(
+                    cursor,
+                    document_id=document_id,
+                    chunks=new_chunks,
+                    timestamp=timestamp,
+                )
+
             for relative_path in deleted:
+                deleted_document_id = self._optional_document_id(
+                    cursor,
+                    relative_path,
+                )
+                if deleted_document_id is not None:
+                    removed += self._count_chunks(cursor, deleted_document_id)
+
                 cursor.execute(_DELETE_DOCUMENT, (relative_path.as_posix(),))
                 self._require_one_row(cursor, "delete", relative_path)
 
             cursor.execute(
                 _UPSERT_METADATA,
-                (LAST_INDEXED_AT_KEY, _format_timestamp(indexed_at)),
+                (LAST_INDEXED_AT_KEY, timestamp),
             )
+
+            if chunking_signature is not None:
+                cursor.execute(
+                    _UPSERT_METADATA,
+                    (CHUNKING_SIGNATURE_KEY, chunking_signature),
+                )
+
+        return ChunkChangeCounts(created=created, removed=removed)
+
+    def _replace_chunks(
+        self,
+        cursor: sqlite3.Cursor,
+        *,
+        document_id: int,
+        chunks: Sequence[TextChunk],
+        timestamp: str,
+    ) -> int:
+        cursor.execute(_DELETE_CHUNKS_FOR_DOCUMENT, (document_id,))
+
+        for chunk in chunks:
+            cursor.execute(
+                _INSERT_CHUNK,
+                (
+                    document_id,
+                    chunk.chunk_index,
+                    chunk.content,
+                    chunk.content_hash,
+                    chunk.start_line,
+                    chunk.end_line,
+                    chunk.character_count,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+
+        return len(chunks)
+
+    def _count_chunks(self, cursor: sqlite3.Cursor, document_id: int) -> int:
+        row = cursor.execute(
+            "SELECT COUNT(*) FROM chunks WHERE document_id = ?",
+            (document_id,),
+        ).fetchone()
+        return int(row[0])
+
+    def _require_document_id(
+        self,
+        cursor: sqlite3.Cursor,
+        relative_path: Path,
+    ) -> int:
+        document_id = self._optional_document_id(cursor, relative_path)
+        if document_id is None:
+            raise IndexDatabaseError(
+                f"Missing document id for {relative_path.as_posix()}"
+            )
+
+        return document_id
+
+    def _optional_document_id(
+        self,
+        cursor: sqlite3.Cursor,
+        relative_path: Path,
+    ) -> int | None:
+        row = cursor.execute(
+            _SELECT_DOCUMENT_ID,
+            (relative_path.as_posix(),),
+        ).fetchone()
+
+        if row is None:
+            return None
+
+        return int(row[0])
 
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Cursor]:
@@ -256,15 +486,29 @@ class IndexDatabase:
 
     def _row_to_document(
         self,
-        row: tuple[str, str, int, str, str, str],
+        row: tuple[int, str, str, int, str, str, str],
     ) -> IndexedDocument:
         return IndexedDocument(
-            relative_path=Path(row[0]),
-            content_hash=row[1],
-            file_size=int(row[2]),
-            modified_at=self._parse_timestamp(row[3]),
-            first_indexed_at=self._parse_timestamp(row[4]),
-            last_indexed_at=self._parse_timestamp(row[5]),
+            relative_path=Path(row[1]),
+            content_hash=row[2],
+            file_size=int(row[3]),
+            modified_at=self._parse_timestamp(row[4]),
+            first_indexed_at=self._parse_timestamp(row[5]),
+            last_indexed_at=self._parse_timestamp(row[6]),
+        )
+
+    def _row_to_chunk(
+        self,
+        row: tuple[int, int, str, str, int, int, int],
+    ) -> DocumentChunk:
+        return DocumentChunk(
+            document_id=int(row[0]),
+            chunk_index=int(row[1]),
+            content=row[2],
+            content_hash=row[3],
+            start_line=int(row[4]),
+            end_line=int(row[5]),
+            character_count=int(row[6]),
         )
 
     def _parse_timestamp(self, value: str) -> datetime:
@@ -298,6 +542,8 @@ def open_index_database(database_path: Path) -> Iterator[IndexDatabase]:
         raise IndexDatabaseError(
             f"Could not open index database {database_path}: {exc}"
         ) from exc
+
+    connection.execute("PRAGMA foreign_keys = ON")
 
     try:
         database = IndexDatabase(connection, database_path)

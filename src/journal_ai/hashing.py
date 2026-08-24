@@ -34,3 +34,8 @@ def hash_file(
         ) from exc
 
     return digest.hexdigest()
+
+
+def hash_text(content: str) -> str:
+    """Return the SHA-256 hex digest of a Unicode string's UTF-8 bytes."""
+    return hashlib.new(HASH_ALGORITHM, content.encode("utf-8")).hexdigest()

@@ -14,12 +14,23 @@ DEFAULT_TIMEOUT_SECONDS = 900.0
 DEFAULT_NUM_PREDICT = 300
 DEFAULT_THINK = False
 
+DEFAULT_CHUNK_TARGET_CHARACTERS = 1000
+DEFAULT_CHUNK_MAX_CHARACTERS = 1600
+DEFAULT_CHUNK_OVERLAP_CHARACTERS = 150
+
 INDEX_STATE_DIR_NAME = ".journal-ai"
 INDEX_DATABASE_FILENAME = "index.sqlite"
 
-TOP_LEVEL_KEYS = frozenset({"journal_path", "ollama"})
+TOP_LEVEL_KEYS = frozenset({"journal_path", "ollama", "chunking"})
 OLLAMA_KEYS = frozenset(
     {"url", "model", "timeout_seconds", "num_predict", "think"}
+)
+CHUNKING_KEYS = frozenset(
+    {
+        "target_characters",
+        "max_characters",
+        "overlap_characters",
+    }
 )
 
 
@@ -53,6 +64,39 @@ def index_database_path(journal_path: Path) -> Path:
 
 
 @dataclass(frozen=True, slots=True)
+class ChunkingConfig:
+    """Settings for deterministic Markdown chunking during indexing."""
+
+    target_characters: int = DEFAULT_CHUNK_TARGET_CHARACTERS
+    max_characters: int = DEFAULT_CHUNK_MAX_CHARACTERS
+    overlap_characters: int = DEFAULT_CHUNK_OVERLAP_CHARACTERS
+
+    def __post_init__(self) -> None:
+        if self.target_characters <= 0:
+            raise ConfigError(
+                "chunking.target_characters must be greater than zero"
+            )
+        if self.max_characters <= 0:
+            raise ConfigError(
+                "chunking.max_characters must be greater than zero"
+            )
+        if self.overlap_characters < 0:
+            raise ConfigError(
+                "chunking.overlap_characters must be zero or greater"
+            )
+        if self.target_characters > self.max_characters:
+            raise ConfigError(
+                "chunking.target_characters must not exceed "
+                "chunking.max_characters"
+            )
+        if self.overlap_characters >= self.max_characters:
+            raise ConfigError(
+                "chunking.overlap_characters must be smaller than "
+                "chunking.max_characters"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class OllamaConfig:
     """Settings for one Ollama server and its generation requests."""
 
@@ -69,6 +113,7 @@ class AppConfig:
 
     journal_path: Path = field(default_factory=default_journal_path)
     ollama: OllamaConfig = field(default_factory=OllamaConfig)
+    chunking: ChunkingConfig = field(default_factory=ChunkingConfig)
 
 
 def load_config(config_path: Path | None = None) -> AppConfig:
@@ -153,7 +198,49 @@ def config_from_mapping(
         ),
     )
 
-    return AppConfig(journal_path=journal_path, ollama=ollama)
+    chunking_data = data.get("chunking", {})
+    if not isinstance(chunking_data, Mapping):
+        raise _config_error("chunking must be a table", source)
+
+    _reject_unknown_keys(
+        chunking_data,
+        allowed=CHUNKING_KEYS,
+        source=source,
+        section="chunking",
+    )
+
+    chunking_defaults = ChunkingConfig()
+    chunking = ChunkingConfig(
+        target_characters=(
+            _as_positive_int(
+                chunking_data["target_characters"],
+                key="chunking.target_characters",
+                source=source,
+            )
+            if "target_characters" in chunking_data
+            else chunking_defaults.target_characters
+        ),
+        max_characters=(
+            _as_positive_int(
+                chunking_data["max_characters"],
+                key="chunking.max_characters",
+                source=source,
+            )
+            if "max_characters" in chunking_data
+            else chunking_defaults.max_characters
+        ),
+        overlap_characters=(
+            _as_non_negative_int(
+                chunking_data["overlap_characters"],
+                key="chunking.overlap_characters",
+                source=source,
+            )
+            if "overlap_characters" in chunking_data
+            else chunking_defaults.overlap_characters
+        ),
+    )
+
+    return AppConfig(journal_path=journal_path, ollama=ollama, chunking=chunking)
 
 
 def apply_overrides(
@@ -206,6 +293,7 @@ def apply_overrides(
             else Path(journal_path).expanduser()
         ),
         ollama=ollama,
+        chunking=config.chunking,
     )
 
 
@@ -277,6 +365,16 @@ def _as_positive_int(value: object, *, key: str, source: Path | None) -> int:
 
     if value <= 0:
         raise _config_error(f"{key} must be greater than zero", source)
+
+    return value
+
+
+def _as_non_negative_int(value: object, *, key: str, source: Path | None) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise _config_error(f"{key} must be an integer", source)
+
+    if value < 0:
+        raise _config_error(f"{key} must be zero or greater", source)
 
     return value
 

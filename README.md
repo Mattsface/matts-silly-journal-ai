@@ -59,7 +59,8 @@ The current implementation supports:
 * Rejecting files outside the journal directory
 * Listing journal entries with word and character counts
 * Tracking journal files in a local SQLite index
-* Detecting which entries are new, changed, unchanged, or deleted
+* Dividing source Markdown into deterministic, searchable chunks during indexing
+* Storing chunk text and line metadata in the local SQLite index
 * Analyzing one explicitly selected journal entry
 * Connecting to a local or remote Ollama server
 * Saving generated analyses under `generated/analyses`
@@ -79,6 +80,7 @@ journal-ai/
 │       ├── __init__.py
 │       ├── cli.py
 │       ├── config.py
+│       ├── chunking.py
 │       ├── hashing.py
 │       ├── index_database.py
 │       ├── index_service.py
@@ -90,10 +92,12 @@ journal-ai/
 ├── tests/
 │   ├── conftest.py
 │   ├── test_analyze_save_workflow.py
+│   ├── test_chunking.py
 │   ├── test_cli_config.py
 │   ├── test_cli_index.py
 │   ├── test_config.py
 │   ├── test_hashing.py
+│   ├── test_index_chunks.py
 │   ├── test_index_database.py
 │   ├── test_index_service.py
 │   ├── test_journal_reader.py
@@ -371,11 +375,55 @@ For each Markdown file the index stores:
 | `first_indexed_at` | When the file first entered the index, UTC |
 | `last_indexed_at` | When the stored record was last written, UTC |
 
-A second table, `index_metadata`, holds only the schema version and the time of the last successful index run.
+A second table, `index_metadata`, holds the schema version, the time of the last successful index run, and a `chunking_signature` that records the chunking algorithm version and the chunking settings used to build the stored chunks.
 
-**Journal content is not stored.** This first version of the index keeps file metadata and hashes only. No entry text, no excerpts, and no embeddings.
+A third table, `chunks`, stores deterministic segments of each source Markdown file. Each chunk row links to a document through `document_id`, includes inclusive one-based `start_line` and `end_line` values, a SHA-256 `content_hash`, and the exact chunk text as it appears in the source file.
 
-**No Ollama calls occur.** Indexing is pure filesystem and SQLite work. It makes no network requests of any kind.
+**Chunk text is derived data.** It is rebuilt from the Markdown files during indexing and is not a substitute for the journal itself. Because the database lives under `.journal-ai` inside the mounted journal, chunk text remains encrypted at rest together with the rest of the volume.
+
+**No Ollama calls occur.** Indexing and chunking are pure filesystem and SQLite work. They make no network requests of any kind.
+
+**Schema upgrades are not migrated.** During this pre-release phase, an index with a different schema version is rejected. Rebuild it from Markdown with `uv run journal-ai index --rebuild`. The database is disposable; journal files are never modified.
+
+### Chunking rules (high level)
+
+During `journal-ai index`, new and content-changed Markdown files are read once, divided into deterministic chunks, and written to SQLite. Unchanged files keep their existing chunk rows unless the chunking signature has changed.
+
+The index stores a `chunking_signature` of the form:
+
+```
+algorithm_version=1;target_characters=1000;max_characters=1600;overlap_characters=150
+```
+
+The same source content, the same chunking settings, and the same algorithm version leave existing chunks untouched. Changing any of them re-chunks currently indexed source documents without classifying them as content-changed. `minimum_characters` is not a supported setting.
+
+`algorithm_version` comes from `CHUNKING_ALGORITHM_VERSION` in `src/journal_ai/chunking.py`. It is never inferred or incremented automatically: a change to how chunk boundaries are chosen must bump that constant by hand so already-indexed documents are re-chunked with the new behavior.
+
+Structural boundaries are preferred in this order:
+
+1. Markdown headings stay with the content below them when possible.
+2. Blank-line-separated paragraphs.
+3. Logseq top-level bullets, keeping nested child bullets with their parent when they fit.
+4. Sentences, then lines, then character positions, only when a block exceeds the configured maximum size. Sentences are preferred over line breaks because a sentence is the better semantic unit; fixed character ranges are the final fallback.
+
+Overlap is used only when oversized content must be split; it is not added between normal sections.
+
+Default size settings (overridable in configuration):
+
+| Setting | Default |
+| --- | --- |
+| `chunking.target_characters` | 1000 |
+| `chunking.max_characters` | 1600 |
+| `chunking.overlap_characters` | 150 |
+
+Example configuration:
+
+```toml
+[chunking]
+target_characters = 1000
+max_characters = 1600
+overlap_characters = 150
+```
 
 ### Update the index
 
@@ -387,20 +435,30 @@ Example output:
 
 ```text
 Index updated.
+Documents
 New:       2
 Changed:   1
 Unchanged: 14
 Deleted:   0
+Chunks
+Created:   8
+Removed:   3
+Total:     47
 ```
 
 Running it again without changing any entries reports:
 
 ```text
 Index already current.
+Documents
 New:       0
 Changed:   0
 Unchanged: 17
 Deleted:   0
+Chunks
+Created:   0
+Removed:   0
+Total:     47
 ```
 
 ### Show index status
@@ -414,6 +472,7 @@ Example output:
 ```text
 Database: /home/example/journal/.journal-ai/index.sqlite
 Documents: 17
+Chunks: 47
 Last updated: 2026-07-31T13:24:18+00:00
 ```
 
@@ -425,7 +484,7 @@ Status reads the database only. It does not scan the journal, and it does not cr
 uv run journal-ai index --rebuild
 ```
 
-This deletes the database file and rebuilds it from the current source files, so every discovered entry is reported as new. Use it after upgrading the schema or if the database is ever damaged.
+This deletes the database file and rebuilds it from the current source files, so every discovered entry is reported as new and all chunks and chunking metadata are recreated. Use it when the schema version does not match, after changing how the index is structured, or if the database is ever damaged.
 
 Only the index database and its SQLite sidecar files are deleted. Journal entries are never touched.
 
@@ -453,7 +512,9 @@ Each indexed run compares the files it discovers with the records already stored
 
 The content hash is authoritative. File size and modification time are stored as metadata and are refreshed when they drift, but they never decide that content changed. Touching a file, or restoring it from a backup, therefore leaves it classified as unchanged and does not mark it for reprocessing.
 
-All inserts, updates, and deletions for one run are applied inside a single SQLite transaction. If any statement fails, the whole run is rolled back and the index is left exactly as it was.
+Changing chunking configuration or the chunking algorithm version is tracked separately through `chunking_signature`. It can replace stored chunks without classifying the source files as content-changed.
+
+All inserts, updates, deletions, chunk replacements, and signature writes for one run are applied inside a single SQLite transaction. If any statement fails, the whole run is rolled back and the index is left exactly as it was.
 
 The index command fails with a clear error when the journal is locked or not mounted.
 
@@ -502,6 +563,9 @@ Replace `/home/example-user/journal` with your own mount point. A leading `~` is
 | `ollama.timeout_seconds` | number > 0 | `900` | HTTP request timeout |
 | `ollama.num_predict` | integer > 0 | `300` | Maximum generated tokens |
 | `ollama.think` | boolean | `false` | Whether the model may think before answering |
+| `chunking.target_characters` | integer > 0 | `1000` | Preferred chunk size while merging blocks |
+| `chunking.max_characters` | integer > 0 | `1600` | Maximum characters in a normal chunk |
+| `chunking.overlap_characters` | integer ≥ 0 | `150` | Overlap used only when oversized content is split |
 
 Limiting output tokens reduces response time on slower hardware and keeps single-entry analyses concise. Thinking is disabled by default so the model does not spend the output-token allowance on hidden reasoning without producing a visible answer.
 
@@ -571,7 +635,7 @@ The project currently follows these rules:
 8. Cloud backups must contain only encrypted journal data.
 9. The decrypted mount must never be synchronized to cloud storage.
 10. Ollama should run locally or on a trusted private network.
-11. The index stores file metadata and hashes, never journal content.
+11. The documents table stores file metadata and hashes; chunk text is derived data rebuildable from source Markdown.
 12. The index database stays inside the encrypted mount under `.journal-ai`.
 
 The directory intended for encrypted cloud backup is:

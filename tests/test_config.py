@@ -286,3 +286,39 @@ def test_apply_overrides_rejects_non_positive_num_predict(
 def test_apply_overrides_rejects_empty_model() -> None:
     with pytest.raises(ConfigError, match="--model must be"):
         apply_overrides(AppConfig(), model="  ")
+
+
+def test_chunking_defaults_are_applied(tmp_path: Path) -> None:
+    config = load_config(write_config(tmp_path, ""))
+
+    assert config.chunking.target_characters == 1000
+    assert config.chunking.max_characters == 1600
+    assert config.chunking.overlap_characters == 150
+    assert not hasattr(config.chunking, "minimum_characters")
+
+
+def test_minimum_characters_is_rejected(tmp_path: Path) -> None:
+    config_path = write_config(
+        tmp_path,
+        """
+        [chunking]
+        minimum_characters = 250
+        """,
+    )
+
+    with pytest.raises(ConfigError, match="chunking.minimum_characters"):
+        load_config(config_path)
+
+
+def test_invalid_chunking_configuration_is_rejected(tmp_path: Path) -> None:
+    config_path = write_config(
+        tmp_path,
+        """
+        [chunking]
+        target_characters = 2000
+        max_characters = 1000
+        """,
+    )
+
+    with pytest.raises(ConfigError, match="target_characters"):
+        load_config(config_path)
